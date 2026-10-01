@@ -7,6 +7,8 @@ import { activeCells } from "../grid.ts";
 import type { Cell, Grid } from "../grid.ts";
 import { arcadeLayout, banner, hud, spriteColor, stageClearLines } from "../kit.ts";
 import type { ClearEvent } from "../kit.ts";
+import { createRng } from "../rng.ts";
+import type { Rng } from "../rng.ts";
 import { cellCenter, cellRect, levelColor } from "../svg.ts";
 import type { Theme } from "../theme.ts";
 
@@ -14,15 +16,27 @@ const DX = [1, 0, -1, 0];
 const DY = [0, 1, 0, -1];
 const ARENA_TOP = -1;
 const ARENA_BOTTOM = 9;
-/** Cells of trail a cycle keeps behind it before the tail starts to fade. */
-const TRAIL = 40;
 const FINALE_STEP = 0.058;
-const FILL_STEP_MIN = 0.07;
-const FILL_STEP_MAX = 0.16;
+/** Seconds the race for the days should take at a comfortable pace. */
+const HUNT_SPAN = 24;
+const BASE_STEP_MIN = 0.07;
+const BASE_STEP_MAX = 0.13;
+/** Share of the days left at which the cycles speed up. */
+const ENDGAME_SHARE = 0.12;
 const CRASH_AFTER = 0.9;
 const LAP_AFTER = 1.7;
-/** Lowest row a crash may happen in, so the blast stays inside the canvas. */
-const CRASH_ROW = 8;
+const LAP_TICKS = 70;
+/** Ticks after the last day within which the rival must have crashed, whatever it takes. */
+const CRASH_DEADLINE = 90;
+/** Steps ahead a cycle must be able to keep driving after a move to count it as safe. */
+const ESCAPE = 36;
+/** Cells a cycle should be able to reach before the other one does, or it risks being walled in. */
+const TERRITORY = 45;
+const CUT_COOLDOWN = 24;
+/** Margin, in cells, that keeps a crash's blast inside the canvas. */
+const CRASH_MARGIN_COLS = 1;
+const CRASH_TOP_ROW = 1;
+const CRASH_BOTTOM_ROW = 7;
 
 interface Arena {
   c0: number;
@@ -36,8 +50,6 @@ export interface Cycle {
   cells: number[];
   /** Seconds after the start of play at which the cycle's centre reaches each cell. */
   head: number[];
-  /** Index of the last day this cycle derezzes. */
-  lastDay: number;
   /** Seconds after play starts at which each cell's trail starts to fade, infinite while it stays. */
   tail: number[];
 }
@@ -52,6 +64,12 @@ export interface TronSim {
   harvestEnd: number;
   /** When the stage is clear: the victory lap has had its run. */
   end: number;
+  /** Cells of trail a cycle keeps behind it. */
+  trail: number;
+  /** Times one cycle cut across the cell just ahead of the other's nose. */
+  nearMisses: number;
+  /** Moves that had nowhere safe to go; always zero unless a cycle got boxed in. */
+  collisions: number;
 }
 
 const idOf = (a: Arena, col: number, row: number) => (col - a.c0) * a.rows + (row - ARENA_TOP);
@@ -71,274 +89,363 @@ function directionOf(a: Arena, from: number, to: number): number {
   return dx > 0 ? 0 : dy > 0 ? 1 : dx < 0 ? 2 : 3;
 }
 
-interface Route {
-  cells: number[];
-  last: number;
-}
-
-/** A serpentine over the rows of one half that hold days, starting and turning in the margin lanes. */
-function harvest(a: Arena, side: 0 | 1, lo: number, hi: number, active: Map<number, Cell>, width: number): Route {
-  const startCol = side === 0 ? -1 : width;
-  const rows: number[] = [];
-  for (let r = 0; r < 7; r++) {
-    for (let c = lo; c <= hi; c++) {
-      if (active.has(idOf(a, c, r))) {
-        rows.push(r);
-        break;
-      }
-    }
-  }
-  if (rows.length === 0) return { cells: [idOf(a, startCol, 3)], last: 0 };
-  const cells: number[] = [];
-  let col = startCol;
-  let row = rows[0];
-  cells.push(idOf(a, col, row));
-  let right = side === 0;
-  rows.forEach((_, i) => {
-    const end = right ? (side === 0 ? hi : width) : side === 0 ? -1 : lo;
-    while (col !== end) {
-      col += col < end ? 1 : -1;
-      cells.push(idOf(a, col, row));
-    }
-    if (i + 1 < rows.length) {
-      while (row !== rows[i + 1]) {
-        row++;
-        cells.push(idOf(a, col, row));
-      }
-    }
-    right = !right;
-  });
-  let last = 0;
-  cells.forEach((c, i) => {
-    if (active.has(c)) last = i;
-  });
-  return { cells: cells.slice(0, last + 1), last };
-}
-
-/**
- * A long, mostly straight path through free cells, used for the filler laps
- * and the victory lap. Straight on is always tried first.
- */
-function wander(a: Arena, start: number, dir: number, steps: number, blocked: Set<number>): number[] {
-  const path: number[] = [];
-  const used = new Set<number>([start]);
-  const stack: { cell: number; dir: number; options: number[]; next: number }[] = [];
-  const run = (cell: number, d: number) => {
-    let n = 0;
-    let c = cell;
-    while (n < 14) {
-      c = neighbour(a, c, d);
-      if (c < 0 || blocked.has(c) || used.has(c)) break;
-      n++;
-    }
-    return n;
-  };
-  const optionsFor = (cell: number, d: number) => {
-    const turns = [(d + 1) % 4, (d + 3) % 4]
-      .filter((nd) => run(cell, nd) > 0)
-      .sort((p, q) => run(cell, q) - run(cell, p));
-    return [...(run(cell, d) > 0 ? [d] : []), ...turns];
-  };
-  stack.push({ cell: start, dir, options: optionsFor(start, dir), next: 0 });
-  let best: number[] = [];
-  let budget = 150_000;
-  while (stack.length && budget-- > 0) {
-    const top = stack[stack.length - 1];
-    if (path.length > best.length) best = path.slice();
-    if (path.length >= steps) break;
-    if (top.next >= top.options.length) {
-      stack.pop();
-      const gone = path.pop();
-      if (gone !== undefined) used.delete(gone);
-      continue;
-    }
-    const d = top.options[top.next++];
-    const to = neighbour(a, top.cell, d);
-    path.push(to);
-    used.add(to);
-    stack.push({ cell: to, dir: d, options: optionsFor(to, d), next: 0 });
-  }
-  return path.length >= best.length ? path : best;
-}
-
 function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));
 }
 
-function stepTimes(count: number, segments: { to: number; dt: number }[]): number[] {
-  const t = [0];
-  let seg = 0;
-  for (let i = 1; i < count; i++) {
-    while (seg + 1 < segments.length && i > segments[seg].to) seg++;
-    t.push(t[i - 1] + segments[seg].dt);
+function collapse(head: number[], tail: number[], from: number): void {
+  let j0 = tail.findIndex((t) => t > from);
+  if (j0 < 0) j0 = tail.length;
+  let prev = 0;
+  for (let i = 0; i < tail.length; i++) {
+    let t = tail[i];
+    if (i >= j0) t = Math.min(t, from + (i - j0) * 0.01);
+    t = Math.max(t, head[i] + 0.001, prev);
+    tail[i] = t;
+    prev = t;
   }
-  return t;
-}
-
-function tailTimes(head: number[], trail: number): number[] {
-  return head.map((_, i) => (i + trail < head.length ? head[i + trail] : Infinity));
 }
 
 /**
- * Plans the whole game: two cycles split the graph between them, each
- * sweeping its half row by row, then the rival rides into the player's wall
- * while the player takes a victory lap. No cycle ever enters a cell that any
- * trail has used, so nothing crashes before the finale.
+ * One whole race, tick by tick. Both cycles take one step per tick, head
+ * for the days they can reach before the other, and never enter a cell whose
+ * trail is still there. Trails fade from the tail after `trail` cells, so
+ * cells come back into play. Once the last day is gone the rival rides into the
+ * player's wall while the player takes a victory lap.
  */
-export function simulateTron(grid: Grid): TronSim {
+function race(grid: Grid, rng: Rng): TronSim {
   const width = grid.width;
   const arena: Arena = { c0: -1, c1: width, cols: width + 2, rows: ARENA_BOTTOM - ARENA_TOP + 1 };
-  const active = new Map<number, Cell>();
-  for (const c of activeCells(grid)) active.set(idOf(arena, c.x, c.y), c);
+  const total = arena.cols * arena.rows;
+  const trail = clamp(Math.round(total * 0.06), 8, 36);
+  const days = new Map<number, Cell>();
+  for (const c of activeCells(grid)) days.set(idOf(arena, c.x, c.y), c);
+  const dayTotal = days.size;
 
-  let bestSplit = { m: Math.floor(width / 2) - 1, cost: Infinity, diff: Infinity };
-  let routes: [Route, Route] | null = null;
-  for (let m = -1; m < width; m++) {
-    const p = harvest(arena, 0, 0, m, active, width);
-    const r = harvest(arena, 1, m + 1, width - 1, active, width);
-    const cost = Math.max(p.last, r.last);
-    const diff = Math.abs(p.last - r.last);
-    if (cost < bestSplit.cost || (cost === bestSplit.cost && diff < bestSplit.diff)) {
-      bestSplit = { m, cost, diff };
-      routes = [p, r];
-    }
-  }
-  const [routeP, routeR] = routes!;
-  const longest = Math.max(routeP.last, routeR.last, 1);
-  const harvestSpan = clamp(longest * 0.115, 7, 34);
-  const dts = [routeP, routeR].map((r) => clamp(harvestSpan / Math.max(r.last, 1), FILL_STEP_MIN, FILL_STEP_MAX));
+  const visit = new Int32Array(total).fill(-1_000_000);
+  const owner = new Int8Array(total).fill(-1);
+  const free = (c: number, t: number) => visit[c] + trail < t;
+  const live = (c: number, t: number) => visit[c] + trail >= t;
 
-  const planned = new Set<number>([...routeP.cells, ...routeR.cells]);
-  const cells: number[][] = [routeP.cells.slice(), routeR.cells.slice()];
+  const startRow = Math.floor(grid.height / 2);
+  const cells: number[][] = [[idOf(arena, -1, startRow)], [idOf(arena, width, startRow)]];
   const dirs = [0, 2];
-  const lasts = [routeP.last, routeR.last];
-  const harvestEnd = Math.max(routeP.last * dts[0], routeR.last * dts[1]);
-  const filler = [0, 0];
-  for (const k of [0, 1] as const) {
-    const gap = harvestEnd - lasts[k] * dts[k];
-    const steps = Math.round(gap / dts[k]);
-    const cs = cells[k];
-    const d = cs.length > 1 ? directionOf(arena, cs[cs.length - 2], cs[cs.length - 1]) : dirs[k];
-    dirs[k] = d;
-    if (steps > 0) {
-      const extra = wander(arena, cs[cs.length - 1], d, steps, planned);
-      for (const c of extra) {
-        cs.push(c);
-        planned.add(c);
-      }
-      filler[k] = extra.length;
-      if (extra.length) dirs[k] = directionOf(arena, cs[cs.length - 2], cs[cs.length - 1]);
-    }
-  }
+  cells.forEach((cs, k) => {
+    visit[cs[0]] = 0;
+    owner[cs[0]] = k;
+  });
 
-  // The player's lap first, so the rival can aim at a wall that is really there.
-  const lapSteps = 150;
-  const lap = wander(arena, cells[0][cells[0].length - 1], dirs[0], lapSteps, planned);
-  const playerCells = cells[0].concat(lap);
-  const paced = (k: number, count: number) =>
-    stepTimes(count, [
-      { to: lasts[k] + filler[k], dt: dts[k] },
-      { to: Infinity, dt: FINALE_STEP },
-    ]);
-  const playerHead = paced(0, playerCells.length);
-  const playerTail = tailTimes(playerHead, TRAIL);
-  const playerIndex = new Map<number, number>();
-  playerCells.forEach((c, i) => playerIndex.set(c, i));
+  const derez: { tick: number; cell: Cell; by: 0 | 1 }[] = [];
+  const fast = new Set<number>();
+  let nearMisses = 0;
+  let collisions = 0;
+  let lastCut = -CUT_COOLDOWN;
+  let doneAt = -1;
+  let crashTick = -1;
+  let crashPoint = { x: 0, y: 0 };
 
-  const rivalStart = cells[1][cells[1].length - 1];
-  const rivalClock = paced(1, cells[1].length)[cells[1].length - 1];
-  const blocked = new Set<number>([...playerCells, ...cells[1]]);
-  const minSteps = Math.ceil(CRASH_AFTER / FINALE_STEP);
-  const maxSteps = 70;
-
-  const wallAt = (cell: number, time: number) => {
-    const j = playerIndex.get(cell);
-    if (j === undefined) return false;
-    return playerHead[j] + 0.05 <= time && time <= playerTail[j] - 0.2;
+  const crashAllowed = (id: number) => {
+    const col = colOf(arena, id);
+    const row = rowOf(arena, id);
+    return col >= CRASH_MARGIN_COLS && col <= width - 1 - CRASH_MARGIN_COLS && row >= CRASH_TOP_ROW && row <= CRASH_BOTTOM_ROW;
   };
 
-  interface Found {
-    path: number[];
-    hit: number;
-  }
-  // Iterative deepening finds the shortest detour that still ends in a wall of the player's trail.
-  const search = (limit: number): Found | null => {
-    const path = [rivalStart];
-    const on = new Set<number>(path);
-    let budget = 60_000;
-    const walk = (cell: number, d: number, depth: number): Found | null => {
-      if (budget-- <= 0) return null;
-      const ahead = neighbour(arena, cell, d);
-      const time = rivalClock + (depth + 0.5) * FINALE_STEP;
-      if (depth >= minSteps && ahead >= 0 && rowOf(arena, ahead) <= CRASH_ROW && wallAt(ahead, time)) return { path: path.slice(), hit: ahead };
-      if (depth >= limit) return null;
+  /** How many steps a cycle can keep driving from `cell` (reached on tick `t`) without meeting a trail. */
+  const escape = (cell: number, dir: number, t: number, near: number[][] = []): number => {
+    const used = new Set<number>([cell]);
+    let budget = 20000;
+    const walk = (c: number, d: number, depth: number): number => {
+      if (depth >= ESCAPE || budget-- <= 0) return depth;
+      let best = depth;
       for (const turn of [0, 1, 3]) {
         const nd = (d + turn) % 4;
-        const to = neighbour(arena, cell, nd);
-        if (to < 0 || blocked.has(to) || on.has(to)) continue;
-        path.push(to);
-        on.add(to);
-        const hit = walk(to, nd, depth + 1);
-        path.pop();
-        on.delete(to);
-        if (hit) return hit;
+        const n = neighbour(arena, c, nd);
+        if (n < 0 || used.has(n) || !free(n, t + depth + 1) || (depth < near.length && near[depth].includes(n))) continue;
+        used.add(n);
+        best = Math.max(best, walk(n, nd, depth + 1));
+        used.delete(n);
+        if (best >= ESCAPE) return best;
+      }
+      return best;
+    };
+    return walk(cell, dir, 0);
+  };
+
+  /** Breadth-first search over cells that are free by the time the cycle gets there. */
+  const search = (start: number, t: number, goal: (c: number, depth: number) => number | null): number => {
+    const dist = new Int16Array(total).fill(-1);
+    dist[start] = 0;
+    let queue = [start];
+    let best = Infinity;
+    let firstDepth = -1;
+    for (let d = 0; queue.length; d++) {
+      if (firstDepth >= 0 && d > firstDepth + 5) break;
+      const next: number[] = [];
+      for (const c of queue) {
+        const g = goal(c, d);
+        if (g !== null) {
+          best = Math.min(best, g);
+          if (firstDepth < 0) firstDepth = d;
+        }
+        for (let nd = 0; nd < 4; nd++) {
+          const n = neighbour(arena, c, nd);
+          if (n < 0 || dist[n] >= 0 || !free(n, t + d + 1)) continue;
+          dist[n] = d + 1;
+          next.push(n);
+        }
+      }
+      queue = next;
+    }
+    return best;
+  };
+
+  /** Cells this cycle gets to first if both race outward from where they are. */
+  const territory = (cell: number, rival: number, t: number): number => {
+    const owner2 = new Int8Array(total).fill(-1);
+    owner2[cell] = 0;
+    owner2[rival] = 1;
+    let queue: number[] = [cell, rival];
+    let mine = 1;
+    for (let d = 0; queue.length && d < 40; d++) {
+      const next: number[] = [];
+      for (const c of queue) {
+        for (let nd = 0; nd < 4; nd++) {
+          const n = neighbour(arena, c, nd);
+          if (n < 0 || owner2[n] >= 0 || !free(n, t + d + 1)) continue;
+          owner2[n] = owner2[c];
+          if (owner2[c] === 0) mine++;
+          next.push(n);
+        }
+      }
+      queue = next;
+    }
+    return mine;
+  };
+
+  const seekDays = (cell: number, t: number, rival: number): number => {
+    const rivalCol = colOf(arena, rival);
+    const rivalRow = rowOf(arena, rival);
+    return search(cell, t, (c, d) => {
+      const day = days.get(c);
+      if (!day) return null;
+      const closer = Math.abs(colOf(arena, c) - rivalCol) + Math.abs(rowOf(arena, c) - rivalRow) < d - 1;
+      return d + (closer ? 5 : 0) - 0.4 * day.level;
+    });
+  };
+
+  const seekWall = (cell: number, t: number): number =>
+    search(cell, t, (c, d) => {
+      for (let nd = 0; nd < 4; nd++) {
+        const n = neighbour(arena, c, nd);
+        if (n >= 0 && owner[n] === 0 && live(n, t + d + 1) && crashAllowed(n)) return d;
       }
       return null;
-    };
-    return walk(rivalStart, dirs[1], 0);
-  };
-  let finaleR: Found | null = null;
-  for (let limit = minSteps; limit <= maxSteps && !finaleR; limit += 2) finaleR = search(limit);
-  if (!finaleR) {
-    // Nowhere to make a real crash: ride straight on until something stops the cycle.
-    let c = rivalStart;
-    const path = [c];
-    for (;;) {
-      const n = neighbour(arena, c, dirs[1]);
-      if (n < 0 || blocked.has(n) || path.length > 16) break;
-      path.push(n);
-      c = n;
-    }
-    finaleR = { path, hit: neighbour(arena, c, dirs[1]) };
-  }
-  const rivalExtra = finaleR.path.slice(1);
-  const rivalCells = cells[1].concat(rivalExtra);
-  const rivalHead = paced(1, rivalCells.length);
-  const crashTime = rivalHead[rivalHead.length - 1] + FINALE_STEP * 0.5;
-  const last = rivalCells[rivalCells.length - 1];
-  const crashDir = rivalCells.length > 1 ? directionOf(arena, rivalCells[rivalCells.length - 2], last) : dirs[1];
-  const crash = {
-    t: crashTime,
-    x: colOf(arena, last) + DX[crashDir] * 0.5,
-    y: rowOf(arena, last) + DY[crashDir] * 0.5,
-  };
-  const end = crashTime + LAP_AFTER;
-  const need = (t: number, head: number[]) => {
-    let n = head.length;
-    while (n > 1 && head[n - 2] >= t) n--;
-    return n;
-  };
-  const playerKeep = need(end + PACE.hold + 0.15, playerHead);
-  const playerFinal = playerCells.slice(0, playerKeep);
-  const playerHeadFinal = playerHead.slice(0, playerKeep);
-
-  const rivalTailNormal = tailTimes(rivalHead, TRAIL);
-  const firstAlive = rivalTailNormal.findIndex((t) => t > crashTime);
-  const j0 = firstAlive < 0 ? rivalCells.length : firstAlive;
-  const rivalTail = rivalTailNormal.map((t, i) => Math.min(t, crashTime + 0.15 + Math.max(0, i - j0) * 0.012));
-
-  const player: Cycle = { cells: playerFinal, head: playerHeadFinal, lastDay: lasts[0], tail: tailTimes(playerHeadFinal, TRAIL) };
-  const rival: Cycle = { cells: rivalCells, head: rivalHead, lastDay: lasts[1], tail: rivalTail };
-
-  const derez: TronSim["derez"] = [];
-  [player, rival].forEach((cy, by) => {
-    cy.cells.forEach((c, i) => {
-      const cell = active.get(c);
-      if (cell && i <= cy.lastDay) derez.push({ t: cy.head[Math.max(0, i - 1)], cell, by: by as 0 | 1 });
     });
-  });
-  derez.sort((p, q) => p.t - q.t);
-  return { arena, cycles: [player, rival], derez, crash, harvestEnd, end };
+
+  /** Distance to the lane just ahead of the other cycle's nose, when it can be reached before the nose gets there. */
+  const intercept = (cell: number, t: number, rival: number, rivalDir: number, rivalMoved: boolean): number => {
+    const line: number[] = [];
+    let c = rival;
+    for (let i = 0; i < 4; i++) {
+      c = neighbour(arena, c, rivalDir);
+      if (c < 0) break;
+      line.push(c);
+    }
+    const base = rivalMoved ? t : t - 1;
+    return search(cell, t, (c2, d) => {
+      const k = line.indexOf(c2) + 1;
+      if (k < 2) return null;
+      const gap = base + k - (t + d);
+      return gap === 1 || gap === 2 ? d : null;
+    });
+  };
+
+  const step = (k: 0 | 1, t: number, finale: boolean) => {
+    const me = cells[k];
+    const head = me[me.length - 1];
+    const dir = dirs[k];
+    const other = cells[1 - k];
+    const rival = other[other.length - 1];
+    const rivalDir = dirs[1 - k];
+    const rivalAlive = !(k === 0 && crashTick >= 0);
+
+    if (finale && k === 1) {
+      const ahead = neighbour(arena, head, dir);
+      const hitWall = ahead >= 0 && live(ahead, t) && owner[ahead] === 0 && crashAllowed(ahead);
+      const late = t > doneAt + CRASH_DEADLINE && (ahead < 0 || live(ahead, t));
+      if ((hitWall && t >= doneAt + Math.ceil(CRASH_AFTER / FINALE_STEP)) || late) {
+        crashTick = t - 1;
+        const [ac, ar] = ahead >= 0 ? [colOf(arena, ahead), rowOf(arena, ahead)] : [colOf(arena, head) + DX[dir], rowOf(arena, head) + DY[dir]];
+        crashPoint = { x: (colOf(arena, head) + ac) / 2, y: (rowOf(arena, head) + ar) / 2 };
+        return;
+      }
+    }
+
+    const options: { n: number; d: number }[] = [];
+    for (const turn of [0, 1, 3]) {
+      const d = (dir + turn) % 4;
+      const n = neighbour(arena, head, d);
+      if (n >= 0 && free(n, t)) options.push({ n, d });
+    }
+    if (options.length === 0) {
+      collisions++;
+      const d = dir;
+      const n = neighbour(arena, head, d);
+      options.push({ n: n >= 0 ? n : head, d });
+    }
+
+    const ahead1 = rivalAlive ? neighbour(arena, rival, rivalDir) : -1;
+    const rivalMoved = other.length > me.length;
+    const reach1: number[] = [];
+    const reach2: number[] = [];
+    if (rivalAlive) {
+      for (const turn of [0, 1, 3]) {
+        const d1 = (rivalDir + turn) % 4;
+        const n1 = neighbour(arena, rival, d1);
+        if (n1 < 0) continue;
+        reach1.push(n1);
+        for (const turn2 of [0, 1, 3]) {
+          const n2 = neighbour(arena, n1, (d1 + turn2) % 4);
+          if (n2 >= 0) reach2.push(n2);
+        }
+      }
+    }
+    /** Whether the other cycle has any move left once `taken` is blocked. */
+    const rivalHasMove = (taken: number) => {
+      if (!rivalAlive) return true;
+      const was = visit[taken];
+      visit[taken] = t;
+      const ok = [0, 1, 3].some((turn) => {
+        const n = neighbour(arena, rival, (rivalDir + turn) % 4);
+        return n >= 0 && free(n, rivalMoved ? t + 1 : t);
+      });
+      visit[taken] = was;
+      return ok;
+    };
+    /** Whether the other cycle still has a way out once `taken` is blocked. */
+    const rivalEscapes = (taken: number) => {
+      const was = visit[taken];
+      visit[taken] = t;
+      const ok = [1, 3].some((turn) => {
+        const nd = (rivalDir + turn) % 4;
+        const n = neighbour(arena, rival, nd);
+        return n >= 0 && free(n, t) && escape(n, nd, t) >= ESCAPE;
+      });
+      visit[taken] = was;
+      return ok;
+    };
+    const seeking = finale && k === 1 && t >= doneAt + Math.ceil(CRASH_AFTER / FINALE_STEP);
+    const hunting = !finale;
+    let best = options[0];
+    let bestScore = Infinity;
+    let bestSafe = false;
+    let bestEscape = -1;
+    for (const o of options) {
+      const room = escape(o.n, o.d, t, [reach1, reach2]);
+      const roomy = !rivalAlive || territory(o.n, rival, t) >= TERRITORY;
+      const safe = room >= ESCAPE && roomy;
+      let score: number;
+      if (hunting) {
+        score = days.has(o.n) ? -0.4 * (days.get(o.n)?.level ?? 0) : seekDays(o.n, t, rival);
+        if (!Number.isFinite(score)) score = 400;
+      } else if (seeking) {
+        score = seekWall(o.n, t);
+        if (!Number.isFinite(score)) score = 400;
+      } else {
+        score = (ESCAPE - room) * 0.6;
+      }
+      score += (o.d === dir ? -0.25 : 0) + rng() * 0.7;
+      if (hunting && o.n === ahead1 && t - lastCut >= CUT_COOLDOWN && rivalEscapes(o.n)) score -= 12;
+      else if (hunting && rivalAlive && t - lastCut >= CUT_COOLDOWN && Math.abs(colOf(arena, rival) - colOf(arena, head)) + Math.abs(rowOf(arena, rival) - rowOf(arena, head)) <= 10 && Number.isFinite(intercept(o.n, t, rival, rivalDir, rivalMoved))) score -= 6;
+      if (!rivalHasMove(o.n)) score += 1000;
+      const better =
+        (safe && !bestSafe) || (safe === bestSafe && (safe ? score < bestScore : room > bestEscape || (room === bestEscape && score < bestScore)));
+      if (better) {
+        best = o;
+        bestScore = score;
+        bestSafe = safe;
+        bestEscape = room;
+      }
+    }
+
+    if (hunting && best.n === ahead1) {
+      nearMisses++;
+      lastCut = t;
+    }
+    visit[best.n] = t;
+    owner[best.n] = k;
+    me.push(best.n);
+    dirs[k] = best.d;
+    const day = days.get(best.n);
+    if (day) {
+      days.delete(best.n);
+      derez.push({ tick: t, cell: day, by: k });
+      if (days.size === 0) doneAt = t;
+    }
+  };
+
+  const limit = 4000;
+  for (let t = 1; t < limit; t++) {
+    if (days.size > 0 && days.size <= dayTotal * ENDGAME_SHARE) fast.add(t);
+    const order: (0 | 1)[] = t % 2 ? [0, 1] : [1, 0];
+    const finale = doneAt >= 0 && t > doneAt;
+    if (dayTotal === 0 && doneAt < 0) doneAt = 0;
+    for (const k of order) {
+      if (k === 1 && crashTick >= 0) continue;
+      step(k, t, finale);
+    }
+    if (crashTick >= 0 && cells[0].length > crashTick + LAP_TICKS) break;
+  }
+  if (crashTick < 0) throw new Error("the rival never crashed");
+
+  const lastTick = cells[0].length - 1;
+  const base = clamp(HUNT_SPAN / Math.max(doneAt, 1), BASE_STEP_MIN, BASE_STEP_MAX);
+  const times = [0];
+  for (let t = 1; t <= lastTick; t++) {
+    times.push(times[t - 1] + (t > doneAt ? FINALE_STEP : fast.has(t) ? base * 0.72 : base));
+  }
+  const crashTime = times[crashTick] + FINALE_STEP * 0.5;
+  const end = crashTime + LAP_AFTER;
+  let keep = lastTick + 1;
+  while (keep > 1 && times[keep - 2] > end + PACE.hold + 0.1) keep--;
+
+  const make = (cs: number[], tCollapse: number): Cycle => {
+    const head = times.slice(0, cs.length);
+    const tail = head.map((_, i) => (i + trail < head.length ? head[i + trail] : Infinity));
+    collapse(head, tail, tCollapse);
+    return { cells: cs, head, tail };
+  };
+  const player = make(cells[0].slice(0, keep), end + 0.1);
+  const rival = make(cells[1].slice(0, crashTick + 1), crashTime + 0.15);
+
+  return {
+    arena,
+    cycles: [player, rival],
+    derez: derez.map((e) => ({ t: times[Math.max(0, e.tick - 1)], cell: e.cell, by: e.by })),
+    crash: { t: crashTime, x: crashPoint.x, y: crashPoint.y },
+    harvestEnd: times[doneAt],
+    end,
+    trail,
+    nearMisses,
+    collisions,
+  };
+}
+
+/**
+ * Plays races until one is clean: nobody got boxed in and the cycles cut each
+ * other off at least once. The cycles read the board well but cannot see each
+ * other's next move, so a few races end in a trap; those are simply replayed.
+ */
+export function simulateTron(grid: Grid, rng: Rng): TronSim {
+  const base = Math.floor(rng() * 1e9);
+  let best: TronSim | null = null;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const sim = race(grid, createRng(`${base}:${attempt}`));
+    if (sim.collisions === 0 && (sim.nearMisses >= 1 || attempt >= 5)) return sim;
+    const better = !best || sim.collisions < best.collisions || (sim.collisions === best.collisions && sim.nearMisses > best.nearMisses);
+    if (better) best = sim;
+  }
+  return best!;
 }
 
 interface Palette {
@@ -382,7 +489,7 @@ function render(ctx: GameContext): GameOutput {
   const dark = isDark(theme);
   const pal = paletteFor(theme);
   const hasPlay = activeCells(grid).length > 0;
-  const sim = hasPlay ? simulateTron(grid) : null;
+  const sim = hasPlay ? simulateTron(grid, ctx.rng) : null;
   const play = sim ? Math.round(sim.end * 100) / 100 : 3;
   const duration = loopDuration(play);
   const restore = restoreAt(play);
@@ -531,9 +638,9 @@ function render(ctx: GameContext): GameOutput {
           const dOut = directionOf(sim.arena, cy.cells[i], cy.cells[i + 1]);
           const turn = (dOut - dIn + 4) % 4;
           const dt = dtAt(i);
-          rotFrames.push([T(cy.head[i]) - 0.3 * dt, `transform:rotate(${angle}deg)`]);
+          rotFrames.push([T(cy.head[i]) - 0.12 * dt, `transform:rotate(${angle}deg)`]);
           angle += turn === 1 ? 90 : -90;
-          rotFrames.push([T(cy.head[i]) + 0.3 * dt, `transform:rotate(${angle}deg)`]);
+          rotFrames.push([T(cy.head[i]) + 0.12 * dt, `transform:rotate(${angle}deg)`]);
         }
       }
       if (n === 1) posFrames.push([T(0), translate(start[0], start[1])]);
@@ -551,13 +658,7 @@ function render(ctx: GameContext): GameOutput {
       const visClass = tl.track(vis);
       cycleMarkup.push(`<g class="${visClass}"><g class="${pos}"><g class="${rot}"><use href="#cyc${which}"/></g></g></g>`);
     });
-    const trailFade = tl.track([
-      [0, "opacity:1"],
-      [restore, "opacity:1"],
-      [fadeEnd, "opacity:0"],
-      [duration, "opacity:0"],
-    ]);
-    trailMarkup.push(`<g class="${trailFade}">${trailGroups.join("")}</g>`);
+    trailMarkup.push(`<g>${trailGroups.join("")}</g>`);
 
     const cleared = new Map<Cell, number>();
     for (const e of sim.derez) cleared.set(e.cell, T(e.t));
