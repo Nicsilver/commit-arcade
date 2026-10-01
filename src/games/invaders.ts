@@ -4,7 +4,7 @@ import { activeCells, allCells, type Cell, type Grid } from "../grid.ts";
 import type { Rng } from "../rng.ts";
 import { levelColor, makeLayout, type Layout } from "../svg.ts";
 import type { Theme } from "../theme.ts";
-import { bitmapPath, pixelText } from "./pixel-font.ts";
+import { bitmapPath, pixelText } from "../pixel-font.ts";
 
 const OCTOPUS = [
   [

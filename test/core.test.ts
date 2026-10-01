@@ -58,3 +58,14 @@ test("rng is seeded", () => {
   assert.equal(createRng("x")(), createRng("x")());
   assert.notEqual(createRng("x")(), createRng("y")());
 });
+
+test("hud score ends on the year's total and resets with the board", async () => {
+  const { hud } = await import("../src/kit.ts");
+  const { resolveTheme } = await import("../src/theme.ts");
+  const grid = sampleGrid("hud");
+  const tl = new Timeline(20);
+  const clears = activeCells(grid).map((cell, i) => ({ t: 1 + i * 0.05, cell }));
+  const svg = hud(tl, grid, { theme: resolveTheme("github-dark"), title: "TEST", clears, resetAt: 18, width: 896 });
+  assert.match(svg, /<g class="hud">/);
+  assert.ok(tl.css().includes("opacity:1"));
+});

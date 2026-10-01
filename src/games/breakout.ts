@@ -3,7 +3,7 @@ import { PACE, loopDuration, restoreAt, type Game, type GameContext, type GameOu
 import { activeCells, allCells, type Cell, type Grid } from "../grid.ts";
 import type { Rng } from "../rng.ts";
 import { cellRect, levelColor, makeLayout, type Layout } from "../svg.ts";
-import { pixelText } from "./pixel-font.ts";
+import { pixelText } from "../pixel-font.ts";
 
 const BALL_R = 3;
 const PADDLE_HALF = 32;

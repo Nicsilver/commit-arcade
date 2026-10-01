@@ -12,7 +12,7 @@ export interface OutputSpec {
   overrides: Partial<Theme>;
 }
 
-const COLOR_KEYS = ["background", "empty", "ink", "muted", "accent"] as const;
+const COLOR_KEYS = ["background", "empty", "ink", "muted", "accent", "surface"] as const;
 
 /**
  * Parses one output line, e.g. `dist/snake.svg?game=snake&theme=github-dark`.
@@ -32,12 +32,16 @@ export function parseOutput(line: string): OutputSpec {
     const v = params.get(key);
     if (v !== undefined) (overrides as Record<string, string | null>)[key] = v === "none" ? null : v;
   }
-  const levels = params.get("levels");
-  if (levels) {
-    const list = levels.split(",").map((s) => s.trim());
-    if (list.length !== 4) throw new Error(`levels needs exactly 4 colours, got ${list.length}`);
-    overrides.levels = list as Theme["levels"];
+  for (const key of ["levels", "sprites"] as const) {
+    const raw = params.get(key);
+    if (!raw) continue;
+    const list = raw.split(",").map((s) => s.trim());
+    if (list.length !== 4) throw new Error(`${key} needs exactly 4 colours, got ${list.length}`);
+    overrides[key] = list as Theme["levels"];
   }
+  // Custom graph colours with default sprite colours would clash, so sprites
+  // follow the graph unless they're set too.
+  if (overrides.levels && !overrides.sprites) overrides.sprites = overrides.levels;
   return {
     path,
     game: params.get("game") ?? "snake",
