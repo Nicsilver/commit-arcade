@@ -1,0 +1,112 @@
+import { fmt } from "../anim.ts";
+
+/** 5x7 bitmap font; every row is a 5 character string where "1" is a lit pixel. */
+const GLYPHS: Record<string, string[]> = {
+  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+  C: ["01110", "10001", "10000", "10000", "10000", "10001", "01110"],
+  D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+  G: ["01110", "10001", "10000", "10111", "10001", "10001", "01111"],
+  H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
+  I: ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
+  J: ["00111", "00010", "00010", "00010", "00010", "10010", "01100"],
+  K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
+  L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+  M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
+  N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+  Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
+  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+  U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
+  V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
+  W: ["10001", "10001", "10001", "10101", "10101", "11011", "10001"],
+  X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
+  Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
+  Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
+  "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+  "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+  "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+  "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+  "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+  "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+  "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+  "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+  "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+  "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+  "!": ["00100", "00100", "00100", "00100", "00100", "00000", "00100"],
+  " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
+};
+
+export interface PixelText {
+  /** Path data in pixel units scaled by `scale`, origin at the top-left corner. */
+  d: string;
+  width: number;
+  height: number;
+}
+
+/** Text as a single compound path so it renders crisply and needs no font. */
+export function pixelText(text: string, scale = 2): PixelText {
+  const chars = [...text.toUpperCase()];
+  const parts: string[] = [];
+  chars.forEach((ch, i) => {
+    const rows = GLYPHS[ch];
+    if (!rows) throw new Error(`No pixel glyph for "${ch}"`);
+    rows.forEach((row, y) => {
+      let x = 0;
+      while (x < row.length) {
+        if (row[x] !== "1") {
+          x++;
+          continue;
+        }
+        let end = x;
+        while (end < row.length && row[end] === "1") end++;
+        parts.push(`M${fmt((i * 6 + x) * scale)} ${fmt(y * scale)}h${fmt((end - x) * scale)}v${fmt(scale)}h${fmt(-(end - x) * scale)}z`);
+        x = end;
+      }
+    });
+  });
+  return { d: parts.join(""), width: Math.max(0, chars.length * 6 - 1) * scale, height: 7 * scale };
+}
+
+/**
+ * Turns bitmap rows ("#" / "." characters) into path data. Runs are merged
+ * horizontally and then downwards so no hairline seams show between pixels
+ * when the image is scaled.
+ */
+export function bitmapPath(rows: string[], scale = 1, ox = 0, oy = 0): string {
+  const open = new Map<string, { x: number; end: number; y: number; h: number }>();
+  const done: { x: number; end: number; y: number; h: number }[] = [];
+  rows.forEach((row, y) => {
+    const seen = new Set<string>();
+    let x = 0;
+    while (x < row.length) {
+      if (row[x] !== "#") {
+        x++;
+        continue;
+      }
+      let end = x;
+      while (end < row.length && row[end] === "#") end++;
+      const key = `${x}:${end}`;
+      seen.add(key);
+      const prev = open.get(key);
+      if (prev && prev.y + prev.h === y) prev.h++;
+      else open.set(key, { x, end, y, h: 1 });
+      x = end;
+    }
+    for (const [key, run] of open) {
+      if (!seen.has(key)) {
+        done.push(run);
+        open.delete(key);
+      }
+    }
+  });
+  done.push(...open.values());
+  return done
+    .map((r) => `M${fmt(ox + r.x * scale)} ${fmt(oy + r.y * scale)}h${fmt((r.end - r.x) * scale)}v${fmt(r.h * scale)}h${fmt(-(r.end - r.x) * scale)}z`)
+    .join("");
+}
