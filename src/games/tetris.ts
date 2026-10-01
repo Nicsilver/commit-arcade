@@ -809,7 +809,7 @@ function renderTetris(ctx: GameContext, play: TetrisPlay): GameOutput {
   }
 
   const bands: string[] = [];
-  const tetrisText = pixelText("TETRIS!", 2);
+  const tetrisText = pixelText("TETRIS!", 3);
   const sweep = sweepOf(W);
   const fourRows = 4 * layout.pitch - layout.gap;
   for (const t0 of play.tetrises) {
@@ -828,7 +828,7 @@ function renderTetris(ctx: GameContext, play: TetrisPlay): GameOutput {
       blink.push([L(at) + k * 0.3, "opacity:0"], [L(at) + k * 0.3 + eps, "opacity:1"], [L(at) + k * 0.3 + 0.18, "opacity:1"], [L(at) + k * 0.3 + 0.18 + eps, "opacity:0"]);
     }
     bands.push(
-      `<path class="${tl.track(blink)}" d="${tetrisText.d}" transform="translate(${fmt(layout.left + layout.gridWidth / 2 - tetrisText.width / 2)} ${fmt(layout.top - 17)})" fill="${theme.accent}"${glowAttr(theme)}/>`,
+      `<path class="${tl.track(blink)}" d="${tetrisText.d}" transform="translate(${fmt(layout.left + layout.gridWidth / 2 - tetrisText.width / 2)} ${fmt(layout.top + ((ROWS - 4) * layout.pitch - tetrisText.height) / 2)})" fill="${theme.accent}"${glowAttr(theme)}/>`,
     );
   }
 
