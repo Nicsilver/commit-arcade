@@ -2,13 +2,14 @@ import { Timeline, fmt, translate, type Frame } from "../anim.ts";
 import { PACE, loopDuration, restoreAt, type Game, type GameContext, type GameOutput } from "../game.ts";
 import { activeCells, allCells, type Cell, type Grid } from "../grid.ts";
 import type { Rng } from "../rng.ts";
-import { cellRect, levelColor, makeLayout, type Layout } from "../svg.ts";
-import { pixelText } from "../pixel-font.ts";
+import type { Theme } from "../theme.ts";
+import { arcadeLayout, banner, glowAttr, glowDefs, hud, spriteColor, stageClearLines, type ClearEvent } from "../kit.ts";
+import { cellRect, levelColor, type Layout } from "../svg.ts";
 
-const BALL_R = 3;
-const PADDLE_HALF = 32;
-const PADDLE_H = 6;
-const VOID = 34;
+const BALL_R = 4;
+const PADDLE_HALF = 30;
+const PADDLE_H = 8;
+const VOID = 40;
 const MAX_TILT = (56 * Math.PI) / 180;
 /** Smallest share of the speed that must point up or down, so rallies never go near-horizontal. */
 const MIN_VERTICAL = 0.5;
@@ -18,12 +19,17 @@ const FIRE_SHARE = 0.35;
 /** The physics runs at a fixed speed and dt; the finished play is then retimed to a pace that fits the loop. */
 const SIM_SPEED = 600;
 const SIM_DT = 1 / 720;
-const TARGET_PLAY = 40;
+const TARGET_PLAY = 36;
 const MIN_SPEED = 330;
 const MAX_SPEED = 800;
 /** The ball speeds up as the board empties, like the arcade original. */
 const RAMP_FROM = 0.8;
 const RAMP_TO = 1.3;
+/** Once this share of the bricks is gone the ball keeps accelerating so the last few don't drag. */
+const RUSH_FROM = 0.7;
+const RUSH_EXTRA = 1.6;
+/** Fastest the ball may travel on screen, in px/s. */
+const RUSH_CAP = 1250;
 
 const WALL = 1;
 const PADDLE = 2;
@@ -319,13 +325,22 @@ export function pacePlay(sim: BreakoutPlay): PlayClock {
   if (sim.hits.length === 0) return { at: (t) => t, length: 2, speeds: [SIM_SPEED, SIM_SPEED] };
   const total = sim.hits.filter((h) => h.final).length;
   const breaks = sim.contacts.map((c) => c.t);
-  const factors = breaks.map((t) => {
-    const done = sim.hits.filter((h) => h.final && h.t <= t).length;
-    return RAMP_FROM + (RAMP_TO - RAMP_FROM) * (done / total);
+  const raw = breaks.map((t) => {
+    const done = sim.hits.filter((h) => h.final && h.t <= t).length / total;
+    const rush = Math.max(0, (done - RUSH_FROM) / (1 - RUSH_FROM)) ** 1.5;
+    return RAMP_FROM + (RAMP_TO - RAMP_FROM) * done + RUSH_EXTRA * rush;
   });
+  let base = SIM_SPEED;
+  let factors = raw;
+  for (let pass = 0; pass < 3; pass++) {
+    factors = raw.map((f) => Math.min(f, RUSH_CAP / base));
+    const sum = [0];
+    for (let i = 1; i < breaks.length; i++) sum.push(sum[i - 1] + (breaks[i] - breaks[i - 1]) / factors[i - 1]);
+    base = Math.min(MAX_SPEED, Math.max(MIN_SPEED, (SIM_SPEED * sum[sum.length - 1]) / TARGET_PLAY));
+  }
+  factors = raw.map((f) => Math.min(f, RUSH_CAP / base));
   const unscaled: number[] = [0];
   for (let i = 1; i < breaks.length; i++) unscaled.push(unscaled[i - 1] + (breaks[i] - breaks[i - 1]) / factors[i - 1]);
-  const base = Math.min(MAX_SPEED, Math.max(MIN_SPEED, (SIM_SPEED * unscaled[unscaled.length - 1]) / TARGET_PLAY));
   const stretch = SIM_SPEED / base;
   const at = (t: number) => {
     let lo = 0;
@@ -341,7 +356,50 @@ export function pacePlay(sim: BreakoutPlay): PlayClock {
   return { at, length: at(sim.length), speeds: [base * factors[0], base * factors[factors.length - 1]] };
 }
 
-const FLASH_TIME = 0.1;
+const FLASH_TIME = 0.08;
+const CHIP_LIFE = 0.6;
+const CHIP_GRAVITY = 300;
+const EMBERS = ["#ffd23f", "#ff9a2a"];
+
+interface Chip {
+  vx: number;
+  vy: number;
+  size: number;
+  spin: number;
+  /** Sparks use the flash colour instead of the brick's. */
+  spark: boolean;
+}
+
+const CHIPS: Chip[] = [
+  { vx: -34, vy: -66, size: 4.8, spin: -260, spark: false },
+  { vx: 38, vy: -72, size: 4.8, spin: 300, spark: false },
+  { vx: -56, vy: -24, size: 5, spin: -180, spark: false },
+  { vx: 58, vy: -28, size: 5, spin: 220, spark: false },
+  { vx: -16, vy: -90, size: 4.2, spin: 340, spark: false },
+  { vx: 20, vy: -84, size: 4.2, spin: -320, spark: false },
+  { vx: -44, vy: -48, size: 2.8, spin: 0, spark: true },
+  { vx: 46, vy: -54, size: 2.8, spin: 0, spark: true },
+];
+
+function chipFrames(c: Chip): Frame[] {
+  const steps = 7;
+  const out: Frame[] = [];
+  for (let k = 0; k <= steps; k++) {
+    const u = (k / steps) * CHIP_LIFE;
+    const fade = Math.min(1, (CHIP_LIFE - u) / (CHIP_LIFE * 0.5));
+    const x = c.vx * u;
+    const y = c.vy * u + 0.5 * CHIP_GRAVITY * u * u;
+    out.push([u, `opacity:${fmt(fade)};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(c.spin * u)}deg) scale(${fmt(0.55 + 0.45 * fade)})`]);
+  }
+  return out;
+}
+
+/** Crack lines across a 12 px brick, three variants so neighbours don't match. */
+const CRACKS = [
+  [[7, 0], [4.5, 4], [7.5, 6.5], [4, 9], [6, 12]],
+  [[3, 0], [6, 3.5], [4, 6], [8, 8.5], [7, 12]],
+  [[9, 0], [6, 3], [8.5, 6], [5, 8.5], [3.5, 12]],
+];
 
 function smoothGlide(t0: number, x0: number, t1: number, x1: number): [number, number][] {
   const out: [number, number][] = [[t0, x0]];
@@ -357,9 +415,14 @@ function smoothGlide(t0: number, x0: number, t1: number, x1: number): [number, n
 
 const state = (fill: string, opacity: number, scale: number) => `fill:${fill};opacity:${opacity};transform:scale(${scale})`;
 
+/** White flashes read on dark pages; on light ones the accent is the brightest thing available. */
+function flashColor(theme: Theme): string {
+  return theme.glow > 0 ? "#ffffff" : theme.accent;
+}
+
 function render(ctx: GameContext): GameOutput {
   const { grid, theme, rng } = ctx;
-  const layout = makeLayout(grid, { left: 14, top: 14 });
+  const layout = arcadeLayout(grid);
   const sim = simulateBreakout(grid, layout, rng);
   const { court } = sim;
   const pace = pacePlay(sim);
@@ -371,18 +434,19 @@ function render(ctx: GameContext): GameOutput {
   const tl = new Timeline(duration, "b");
   const startY = court.padTop - BALL_R;
   const empty = sim.hits.length === 0;
-
-  const width = court.fieldR + 14;
-  const height = court.padTop + PADDLE_H + 10;
+  const glow = glowAttr(theme);
+  const flash = flashColor(theme);
+  const gridCx = layout.left + layout.gridWidth / 2;
+  const gridCy = layout.top + layout.gridHeight / 2;
+  const wallBottom = court.padTop + PADDLE_H + 4;
 
   const parts: string[] = [];
   parts.push(
-    `<path d="M${court.fieldL - 1} ${court.padTop + PADDLE_H}V${court.fieldT - 1}H${court.fieldR + 1}V${court.padTop + PADDLE_H}" fill="none" stroke="${theme.muted}" stroke-opacity=".5" stroke-width="2" stroke-linejoin="round"/>`,
+    `<path d="M${court.fieldL - 1.5} ${wallBottom}V${court.fieldT - 1.5}H${court.fieldR + 1.5}V${wallBottom}" fill="none" stroke="${theme.accent}" stroke-width="3" stroke-linejoin="round"${glow}/>`,
+    `<path d="M${court.fieldL + 1.5} ${wallBottom}V${court.fieldT + 1.5}H${court.fieldR - 1.5}V${wallBottom}" fill="none" stroke="${theme.ink}" stroke-opacity=".28" stroke-width="1"/>`,
   );
   for (const cell of allCells(grid)) parts.push(cellRect(layout, cell, theme.empty));
 
-  const flash = theme.ink;
-  const pops: string[] = [];
   const hitsByCell = new Map<Cell, BrickHit[]>();
   for (const h of sim.hits) {
     const list = hitsByCell.get(h.cell) ?? [];
@@ -390,49 +454,81 @@ function render(ctx: GameContext): GameOutput {
     hitsByCell.set(h.cell, list);
   }
 
-  const burst = [
-    { dx: -11, dy: -9 },
-    { dx: 12, dy: -7 },
-    { dx: -8, dy: 3 },
-    { dx: 9, dy: 5 },
-  ].map(({ dx, dy }) =>
-    tl.keyframes([
-      [0, "opacity:1;transform:translate(0px,0px) scale(1)"],
-      [0.18, `opacity:.9;transform:translate(${fmt(dx * 0.65)}px,${fmt(dy * 0.65 - 3)}px) scale(.8)`],
-      [0.5, `opacity:0;transform:translate(${dx}px,${dy + 6}px) scale(.3)`],
-    ]),
-  );
-  const burstClass = ["pa", "pb", "pc", "pd"];
-  const burstCss = burst.map((name, i) => `.${burstClass[i]}{animation:${name} ${fmt(duration)}s ease-out infinite;animation-delay:var(--d)}`);
+  const chipNames = CHIPS.map((c) => tl.keyframes(chipFrames(c)));
+  const chipCss = chipNames.map((name, i) => `.c${i}{animation:${name} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`);
+  const ringName = tl.keyframes([
+    [0, "opacity:.9;transform:scale(.4)"],
+    [0.35, "opacity:0;transform:scale(2.8)"],
+  ]);
+  const bigRingName = tl.keyframes([
+    [0, "opacity:1;transform:scale(.3)"],
+    [0.7, "opacity:0;transform:scale(9)"],
+  ]);
+  const delayFor = (t: number) => `--d:${fmt(-(duration - t))}s`;
 
+  const cracks: string[] = [];
+  const pops: string[] = [];
+  const clears: ClearEvent[] = [];
   for (const cell of activeCells(grid)) {
     const hits = hitsByCell.get(cell) ?? [];
     const top = levelColor(theme, cell);
     const worn = levelColor(theme, { ...cell, level: (cell.level - 1) as Cell["level"] });
     const frames: Frame[] = [[0, state(top, 1, 1)]];
     let last = top;
+    let crackAt = -1;
     for (const h of hits) {
       const t = at(h.t);
       if (!h.final) {
-        frames.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + FLASH_TIME * 1.2, state(worn, 1, 1)]);
+        frames.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + FLASH_TIME, state(worn, 1, 1)]);
         last = worn;
+        crackAt = t;
       } else {
-        frames.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + FLASH_TIME, state(flash, 0, 1.45)]);
-        const delay = -(duration - t);
+        frames.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + 0.06, state(flash, 1, 1.25)], [t + 0.061, state(flash, 0, 1.25)]);
+        clears.push({ t, cell });
         const cx = layout.left + cell.x * layout.pitch + layout.cell / 2;
         const cy = layout.top + cell.y * layout.pitch + layout.cell / 2;
-        const px = (n: number) => fmt(n - 1.2);
-        pops.push(
-          `<g fill="${last}" style="--d:${fmt(delay)}s">${burstClass
-            .map((c) => `<rect class="p ${c}" x="${px(cx)}" y="${px(cy)}" width="2.4" height="2.4"/>`)
-            .join("")}</g>`,
-        );
+        const burning = sim.fire !== null && h.t >= sim.fire.t;
+        const base = burning ? EMBERS[1] : spriteColor(theme, { level: Math.min(4, cell.level + 1) as Cell["level"] });
+        const spark = burning ? EMBERS[0] : flash;
+        const chips = CHIPS.map((c, i) => {
+          const s = c.size;
+          return `<rect class="p c${i}"${c.spark ? ` fill="${spark}"` : ""} x="${fmt(-s / 2)}" y="${fmt(-s / 2)}" width="${s}" height="${s}"/>`;
+        }).join("");
+        pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})" fill="${base}" style="${delayFor(t + 0.06)}">${chips}</g>`);
+        if (crackAt >= 0 && t > crackAt + FLASH_TIME + 0.02) {
+          const [ox, oy] = [layout.left + cell.x * layout.pitch, layout.top + cell.y * layout.pitch];
+          const d = CRACKS[(cell.x + cell.y * 2) % CRACKS.length].map(([x, y], i) => `${i ? "L" : "M"}${fmt(ox + x)} ${fmt(oy + y)}`).join("");
+          const cls = tl.track([[0, "opacity:0"], [crackAt + FLASH_TIME, "opacity:0"], [crackAt + FLASH_TIME + 0.001, "opacity:1"], [t, "opacity:1"], [t + 0.001, "opacity:0"]]);
+          cracks.push(`<path class="${cls}" d="${d}" fill="none" stroke="${theme.surface}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`);
+        }
       }
     }
     frames.push([back, state(top, 0, 1)], [back + PACE.restore, state(top, 1, 1)]);
     parts.push(cellRect(layout, cell, top, `class="b ${tl.track(frames)}"`));
   }
-  parts.push(...pops);
+  parts.push(...cracks, ...pops);
+
+  const lastHit = sim.hits.length ? sim.hits[sim.hits.length - 1] : null;
+  if (lastHit) {
+    const t = at(lastHit.t);
+    const cx = layout.left + lastHit.cell.x * layout.pitch + layout.cell / 2;
+    const cy = layout.top + lastHit.cell.y * layout.pitch + layout.cell / 2;
+    parts.push(`<circle class="p bring" cx="${fmt(cx)}" cy="${fmt(cy)}" r="6" fill="none" stroke="${flash}" stroke-width="2" style="${delayFor(t)}"/>`);
+    const surge = tl.track([[0, "opacity:0"], [t, "opacity:0"], [t + 0.001, "opacity:.16"], [t + 0.28, "opacity:0"]]);
+    parts.push(
+      `<rect class="${surge}" x="${fmt(layout.left)}" y="${fmt(layout.top)}" width="${fmt(layout.gridWidth)}" height="${fmt(layout.gridHeight)}" fill="${flash}"/>`,
+    );
+  }
+
+  const ringCss = [
+    `.pr{animation:${ringName} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`,
+    `.bring{animation:${bigRingName} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`,
+  ];
+  const padRings: string[] = [];
+  for (const [t, x, y] of sim.ball.slice(1)) {
+    if (y !== startY) continue;
+    padRings.push(`<ellipse class="p pr" cx="${fmt(x)}" cy="${fmt(court.padTop)}" rx="7" ry="1.6" fill="none" stroke="${theme.accent}" stroke-width="1.5" style="${delayFor(at(t))}"/>`);
+  }
 
   // Paddle: glides between contact points, with a squash on every touch.
   const paddleFrames: Frame[] = [];
@@ -467,22 +563,25 @@ function render(ctx: GameContext): GameOutput {
   for (const [t, x, y] of sim.ball.slice(1)) ballFrames.push([at(t), ballPos(x, y)]);
   const ballEnd = sim.ball[sim.ball.length - 1];
   ballFrames.push([back, ballPos(ballEnd[1], ballEnd[2])]);
-  const glide = smoothGlide(back, cur.x, returnEnd, court.startX);
-  for (const [gt, gx] of glide) paddleFrames.push([gt, pos(gx)]);
+  for (const [gt, gx] of smoothGlide(back, cur.x, returnEnd, court.startX)) paddleFrames.push([gt, pos(gx)]);
   for (const [gt, gx] of smoothGlide(back, empty ? court.startX : ballEnd[1], returnEnd, court.startX)) {
     ballFrames.push([gt, ballPos(gx, startY)]);
   }
   paddleFrames.push([duration, pos(court.startX)]);
   ballFrames.push([duration, ballPos(court.startX, startY)]);
 
+  parts.push(...padRings);
   const padRaw = tl.track(paddleFrames);
   const padSquash = tl.track(squash, "linear");
+  const padW = PADDLE_HALF * 2;
   parts.push(
-    `<g class="${padRaw}"><g class="sq ${padSquash}">` +
-      `<rect x="${-PADDLE_HALF - 2}" y="-2" width="${PADDLE_HALF * 2 + 4}" height="${PADDLE_H + 4}" rx="${PADDLE_H / 2 + 2}" fill="${theme.accent}" opacity=".22"/>` +
-      `<rect x="${-PADDLE_HALF}" y="0" width="${PADDLE_HALF * 2}" height="${PADDLE_H}" rx="${PADDLE_H / 2}" fill="${theme.ink}"/>` +
-      `<rect x="${-PADDLE_HALF + 3}" y="0" width="${PADDLE_HALF * 2 - 6}" height="1.8" rx=".9" fill="${theme.accent}"/>` +
-      `</g></g>`,
+    `<g class="${padRaw}"><g class="sq ${padSquash}"><g${glow}>` +
+      `<rect x="${-PADDLE_HALF - 3}" y="-3" width="${padW + 6}" height="${PADDLE_H + 6}" rx="${PADDLE_H / 2 + 3}" fill="${theme.accent}" opacity=".24"/>` +
+      `<rect x="${-PADDLE_HALF}" y="0" width="${padW}" height="${PADDLE_H}" rx="${PADDLE_H / 2}" fill="${theme.ink}"/>` +
+      `<rect x="${-PADDLE_HALF}" y="0" width="9" height="${PADDLE_H}" rx="${PADDLE_H / 2}" fill="${theme.accent}"/>` +
+      `<rect x="${PADDLE_HALF - 9}" y="0" width="9" height="${PADDLE_H}" rx="${PADDLE_H / 2}" fill="${theme.accent}"/>` +
+      `<rect x="${-PADDLE_HALF + 10}" y="1.5" width="${padW - 20}" height="1.8" rx=".9" fill="${theme.surface}" opacity=".45"/>` +
+      `</g></g></g>`,
   );
 
   const ballKeys = tl.keyframes(ballFrames);
@@ -490,62 +589,56 @@ function render(ctx: GameContext): GameOutput {
     sizes
       .map((s, i) => {
         const cls = tl.useKeyframes(ballKeys, lags[i]);
-        return `<rect class="${cls}" x="${fmt(-s / 2)}" y="${fmt(-s / 2)}" width="${s}" height="${s}" rx="${fmt(s / 4)}" fill="${colors[i]}" opacity="${opacities[i]}"/>`;
+        return `<circle class="${cls}" r="${fmt(s / 2)}" fill="${colors[i]}" opacity="${opacities[i]}"/>`;
       })
       .join("");
+  const bare = (inner: string) => `<g class="${tl.useKeyframes(ballKeys, 0)}"><g${glow}>${inner}</g></g>`;
+  // The trail would drag across the board while the ball slides back to the serve spot.
+  const trailOff = tl.track([[0, "opacity:1"], [back, "opacity:1"], [back + 0.001, "opacity:0"], [duration - 0.001, "opacity:0"]]);
 
   const plain =
-    ghosts([5.4, 4.8, 4.2, 3.6], [0.012, 0.024, 0.036, 0.048], Array(4).fill(theme.ink), [0.34, 0.24, 0.15, 0.08]) +
-    `<rect class="${tl.useKeyframes(ballKeys, 0)}" x="-3" y="-3" width="6" height="6" rx="1.5" fill="${theme.ink}"/>`;
+    `<g class="${trailOff}">${ghosts([7.2, 6.4, 5.6, 4.6, 3.6], [0.011, 0.022, 0.034, 0.048, 0.064], Array(5).fill(theme.accent), [0.6, 0.45, 0.32, 0.2, 0.1])}</g>` +
+    bare(
+      `<circle r="8" fill="${theme.accent}" opacity=".3"/><circle r="${BALL_R}" fill="${theme.ink}"/>`,
+    );
   if (sim.fire) {
     const f = sim.fire;
     const ft = at(f.t);
     parts.push(`<g class="${tl.track([[0, "opacity:1"], [ft, "opacity:1"], [ft + 0.001, "opacity:0"], [parkT, "opacity:0"], [parkT + 0.001, "opacity:1"]])}">${plain}</g>`);
     const embers = ["#ffd23f", "#ffa51f", "#ff7a1a", "#ff5a1a", "#e8321a", "#c2241a"];
     const flameGhosts = ghosts(
-      [6.4, 5.8, 5.2, 4.6, 3.8, 3],
+      [9, 8.2, 7.4, 6.4, 5.2, 4],
       [0.01, 0.02, 0.032, 0.046, 0.062, 0.08],
       embers,
       [0.95, 0.85, 0.7, 0.55, 0.4, 0.25],
     );
-    const core =
-      `<rect class="${tl.useKeyframes(ballKeys, 0)}" x="-3.4" y="-3.4" width="6.8" height="6.8" rx="2" fill="#ff6a1a"/>` +
-      `<rect class="${tl.useKeyframes(ballKeys, 0)}" x="-1.8" y="-1.8" width="3.6" height="3.6" rx="1" fill="#fff0a8"/>`;
-    parts.push(`<g class="${tl.track([[0, "opacity:0"], [ft, "opacity:0"], [ft + 0.001, "opacity:1"], [parkT, "opacity:1"], [parkT + 0.001, "opacity:0"]])}">${flameGhosts}${core}</g>`);
+    const core = `<circle r="9" fill="#ff7a1a" opacity=".3"/><circle r="4.6" fill="#ff6a1a"/><circle r="2.4" fill="#fff0a8"/>`;
+    parts.push(
+      `<g class="${tl.track([[0, "opacity:0"], [ft, "opacity:0"], [ft + 0.001, "opacity:1"], [parkT, "opacity:1"], [parkT + 0.001, "opacity:0"]])}"><g class="${trailOff}">${flameGhosts}</g>${bare(core)}</g>`,
+    );
     const ring = tl.track([
       [ft, "opacity:0;transform:scale(.4)"],
       [ft + 0.001, "opacity:1;transform:scale(.6)"],
-      [ft + 0.4, "opacity:0;transform:scale(4.5)"],
+      [ft + 0.45, "opacity:0;transform:scale(5.5)"],
     ]);
-    parts.push(`<circle class="ring ${ring}" cx="${fmt(f.x)}" cy="${fmt(f.y)}" r="4" fill="none" stroke="#ff7a1a" stroke-width="1.6"/>`);
+    parts.push(`<circle class="p ring ${ring}" cx="${fmt(f.x)}" cy="${fmt(f.y)}" r="4" fill="none" stroke="#ff7a1a" stroke-width="2"/>`);
   } else {
     parts.push(plain);
   }
 
   if (!empty) {
-    const text = pixelText("CLEAR!", 3);
-    const tx = fmt(layout.left + layout.gridWidth / 2 - text.width / 2);
-    const ty = fmt(layout.top + layout.gridHeight / 2 - text.height / 2);
-    const blink: Frame[] = [[0, "opacity:0"]];
-    let t = parkT + 0.05;
-    for (let i = 0; i < 4; i++) {
-      blink.push([t, "opacity:0"], [t + 0.001, "opacity:1"], [t + 0.13, "opacity:1"], [t + 0.131, "opacity:0"]);
-      t += 0.26;
-    }
-    blink.push([t, "opacity:0"], [t + 0.001, "opacity:1"], [back - 0.05, "opacity:1"], [back - 0.049, "opacity:0"]);
-    parts.push(
-      `<g class="${tl.track(blink)}"><path d="${text.d}" transform="translate(${fmt(Number(tx) + 3)} ${fmt(Number(ty) + 3)})" fill="${theme.accent}"/>` +
-        `<path d="${text.d}" transform="translate(${tx} ${ty})" fill="${theme.ink}"/></g>`,
-    );
+    parts.push(banner(tl, { theme, lines: stageClearLines(grid), cx: gridCx, cy: gridCy, from: parkT + 0.1, to: back - 0.05 }));
   }
+  parts.push(hud(tl, grid, { theme, title: "BREAKOUT", clears, resetAt: back, width: layout.width }));
 
   const css = [
     ".b,.p,.sq,.ring{transform-box:fill-box;transform-origin:center}",
     ".sq{transform-origin:50% 100%}",
-    ...burstCss,
+    ...chipCss,
+    ...ringCss,
     tl.css(),
   ].join("\n");
-  return { width, height, css, body: parts.join("\n") };
+  return { width: layout.width, height: layout.height, css, defs: glowDefs(theme), body: parts.join("\n") };
 }
 
 export const breakout: Game = { id: "breakout", title: "Breakout", render };

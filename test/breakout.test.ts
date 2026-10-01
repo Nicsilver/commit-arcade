@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { renderGame } from "../src/render.ts";
 import { activeCells, sampleGrid, type Grid, type Level } from "../src/grid.ts";
 import { createRng } from "../src/rng.ts";
-import { makeLayout } from "../src/svg.ts";
+import { arcadeLayout } from "../src/kit.ts";
 import { THEMES } from "../src/theme.ts";
 import { breakout, pacePlay, simulateBreakout } from "../src/games/breakout.ts";
 
@@ -20,7 +20,7 @@ const dense = withLevels(sample, () => 4);
 const sparse = withLevels(sample, (x, y) => (y === 3 && [4, 20, 33, 47].includes(x) ? 3 : 0));
 
 function play(grid: Grid) {
-  return simulateBreakout(grid, makeLayout(grid, { left: 14, top: 14 }), createRng("test"));
+  return simulateBreakout(grid, arcadeLayout(grid), createRng("test"));
 }
 
 test("every active cell is cleared during play", () => {
