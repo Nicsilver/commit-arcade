@@ -8,6 +8,7 @@ import { invaders } from "./invaders.ts";
 import { pacman } from "./pacman.ts";
 import { snake } from "./snake.ts";
 import { tetris } from "./tetris.ts";
+import { tron } from "./tron.ts";
 
 export const GAMES: Record<string, Game> = {
   snake,
@@ -19,4 +20,5 @@ export const GAMES: Record<string, Game> = {
   bomberman,
   galaga,
   centipede,
+  tron,
 };
