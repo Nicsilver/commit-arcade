@@ -1,23 +1,29 @@
 import { fmt, Timeline, type Frame } from "../anim.ts";
 import { loopDuration, PACE, restoreAt, type Game, type GameContext, type GameOutput } from "../game.ts";
 import { activeCells, type Cell, type Grid } from "../grid.ts";
+import { arcadeLayout, banner, glowAttr, glowDefs, hud, spriteColor, stageClearLines, type ClearEvent } from "../kit.ts";
 import { createRng, type Rng } from "../rng.ts";
-import { cellCenter, cellRect, levelColor, makeLayout, type Layout } from "../svg.ts";
+import { cellCenter, cellRect, levelColor, type Layout } from "../svg.ts";
 
-// Open space around the graph: the ship needs somewhere to stand on a fully
-// dense graph, and the saucer flies in the taller top margin.
-const MARGIN = { left: 26, top: 36, right: 26, bottom: 26 };
-const CLEARANCE = 6.5;
-const NOSE = 8;
+const CLEARANCE = 8;
+const NOSE = 11;
 const BULLET_SPEED = 800;
 const SAUCER_SPEED = 300;
-const SAUCER_LANE = 10;
+const SAUCER_LANE = 186;
 const MAX_PLAY = 80;
 const THRUST_EASE = "cubic-bezier(.5,0,.2,1)";
 const TURN_EASE = "cubic-bezier(.4,0,.2,1)";
 const DIRS: [number, number][] = [
   [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1],
 ];
+
+/** How long final fragments drift before they have faded out. */
+const DEBRIS_LIFE = 0.85;
+const ROCK_RADIUS = 6.5;
+/** Debris and rocks stay inside this box (inset from the canvas, below the score bar). */
+const BOUNDS = { left: 6, right: 6, top: 28, bottom: 8 };
+/** Busy days that split count for three shots, so cap the total on big graphs. */
+const SHOT_BUDGET = 1.25;
 
 interface Pt {
   x: number;
@@ -48,6 +54,43 @@ export interface Hit {
   point: Pt;
   /** Direction of the bullet, radians. */
   dir: number;
+  /** A busy day breaks into two medium rocks instead of shattering at once. */
+  split: boolean;
+}
+
+interface Box {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+/** A medium rock: it drifts, bounces softly off the box and waits to be shot again. */
+export interface Rock {
+  cell: Cell;
+  /** Contributions credited when this rock is shot. */
+  share: number;
+  /** Spawn time, and when its shot lands (Infinity until it is shot). */
+  t0: number;
+  t1: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  /** Degrees, and degrees per second. */
+  phi: number;
+  spin: number;
+  radii: number[];
+  /** Earliest time the ship goes after it, so the drift is seen. */
+  ripe: number;
+  box: Box;
+}
+
+export interface RockHit {
+  rock: Rock;
+  t: number;
+  point: Pt;
+  dir: number;
 }
 
 export interface SaucerPlan {
@@ -65,14 +108,53 @@ export interface AsteroidsPlay {
   burns: [number, number][];
   bullets: Bullet[];
   hits: Hit[];
+  rocks: Rock[];
+  rockHits: RockHit[];
+  /** One entry per share of a day's contributions, in the order the score should count them. */
+  clears: ClearEvent[];
   saucer: SaucerPlan | null;
-  /** Seconds from the first shot until the last rock has shattered, plus a beat. */
+  /** Seconds until the last rock has shattered and its fragments have faded. */
   play: number;
 }
 
 function wrapDelta(d: number): number {
   const twoPi = Math.PI * 2;
   return ((((d + Math.PI) % twoPi) + twoPi) % twoPi) - Math.PI;
+}
+
+function fold(v: number, lo: number, hi: number): number {
+  const span = hi - lo;
+  let u = (v - lo) % (2 * span);
+  if (u < 0) u += 2 * span;
+  return lo + (u > span ? 2 * span - u : u);
+}
+
+export function rockAt(rock: Rock, t: number): Pt {
+  const dt = Math.max(0, t - rock.t0);
+  return {
+    x: fold(rock.x + rock.vx * dt, rock.box.x0, rock.box.x1),
+    y: fold(rock.y + rock.vy * dt, rock.box.y0, rock.box.y1),
+  };
+}
+
+/** Times at which a rock turns around at the edge of its box, between spawn and `until`. */
+function rockBounces(rock: Rock, until: number): number[] {
+  const out: number[] = [];
+  for (const [p, v, lo, hi] of [
+    [rock.x, rock.vx, rock.box.x0, rock.box.x1],
+    [rock.y, rock.vy, rock.box.y0, rock.box.y1],
+  ]) {
+    if (Math.abs(v) < 1e-9) continue;
+    const span = hi - lo;
+    const step = v > 0 ? 1 : -1;
+    let k = v > 0 ? Math.floor((p - lo) / span) + 1 : Math.ceil((p - lo) / span) - 1;
+    for (; ; k += step) {
+      const t = rock.t0 + (lo + k * span - p) / v;
+      if (t >= until) break;
+      out.push(t);
+    }
+  }
+  return out.sort((a, b) => a - b);
 }
 
 /** Entry parameter of the ray/segment `a + t*d` into a box, for t in [0, tMax], or null. */
@@ -94,6 +176,14 @@ function slab(a: Pt, dx: number, dy: number, x0: number, y0: number, x1: number,
     hi = Math.min(hi, e);
   }
   return lo <= hi ? lo : null;
+}
+
+function nearSegment(a: Pt, b: Pt, p: Pt, r: number): boolean {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy || 1;
+  const u = Math.min(1, Math.max(0, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+  return Math.hypot(a.x + dx * u - p.x, a.y + dy * u - p.y) < r;
 }
 
 class Field {
@@ -198,13 +288,14 @@ class Field {
 
 interface Candidate {
   cell: Cell;
+  rock: Rock | null;
   dist: number;
   angle: number;
   delta: number;
   cost: number;
 }
 
-export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: number): AsteroidsPlay {
+export function planAsteroids(grid: Grid, layout: Layout, size: { width: number; height: number }, seed: number, tempo: number): AsteroidsPlay {
   const rng = createRng(seed);
   const field = new Field(grid, layout);
   const cells = activeCells(grid);
@@ -212,18 +303,23 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
   const W = grid.width;
   const H = grid.height;
   const NJ = H + 2;
-  const width = layout.left + layout.gridWidth + MARGIN.right;
-  const height = layout.top + layout.gridHeight + MARGIN.bottom;
+  const { width, height } = size;
   const center: Pt = { x: layout.left + layout.gridWidth / 2, y: layout.top + layout.gridHeight / 2 };
+  const box = rockBox(width, height);
 
   const gap = 0.17 / tempo;
   const aimSpeed = 10 * tempo;
   const turnSpeed = 7 * tempo;
 
+  const splitting = chooseSplits(cells, rng);
+
   const poses: Pose[] = [];
   const burns: [number, number][] = [];
   const bullets: Bullet[] = [];
   const hits: Hit[] = [];
+  const rocks: Rock[] = [];
+  const rockHits: RockHit[] = [];
+  const clears: ClearEvent[] = [];
   const inFlight: Hit[] = [];
   const reserved = new Set<Cell>();
   let saucer: SaucerPlan | null = null;
@@ -285,14 +381,21 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
   };
 
   const liveCells = () => cells.filter((c) => field.alive[c.x][c.y]);
+  const looseRocks = (now: number) => rocks.filter((r) => r.t1 === Infinity && r.t0 <= now);
 
-  const visibleFrom = (p: Pt): number => {
+  const visibleFrom = (p: Pt, now: number): number => {
     let n = 0;
     for (const c of liveCells()) {
       const [cx, cy] = cellCenter(layout, c.x, c.y);
       const len = Math.hypot(cx - p.x, cy - p.y);
       const h = field.cast(p, (cx - p.x) / len, (cy - p.y) / len);
       if (h && h.cell === c) n++;
+    }
+    for (const r of looseRocks(now)) {
+      const q = rockAt(r, now + 1);
+      const len = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+      const h = field.cast(p, (q.x - p.x) / len, (q.y - p.y) / len);
+      if (!h || h.dist > len) n += 5;
     }
     return n;
   };
@@ -335,11 +438,39 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     poses.push({ t: t1, x, y, a, ease: "linear" });
   };
 
+  const spawnRocks = (h: Hit) => {
+    const [cx, cy] = cellCenter(layout, h.cell.x, h.cell.y);
+    const third = Math.floor(h.cell.count / 3);
+    [-1, 1].forEach((side, k) => {
+      // Heading back toward the shooter keeps the rock in the line of fire
+      // instead of sliding out of sight behind the days around it.
+      const heading = h.dir + Math.PI + side * (0.6 + rng() * 0.6);
+      const speed = 20 + rng() * 10;
+      const born = h.t;
+      rocks.push({
+        cell: h.cell,
+        share: k === 0 ? third : h.cell.count - 2 * third,
+        t0: born,
+        t1: Infinity,
+        x: cx,
+        y: cy,
+        vx: Math.cos(heading) * speed,
+        vy: Math.sin(heading) * speed,
+        phi: rng() * 360,
+        spin: (rng() < 0.5 ? -1 : 1) * (25 + rng() * 40),
+        radii: Array.from({ length: 8 }, () => ROCK_RADIUS * (0.78 + rng() * 0.38)),
+        ripe: born + 0.7 + rng() * 0.5,
+        box,
+      });
+    });
+  };
+
   const land = (now: number) => {
     for (let k = inFlight.length - 1; k >= 0; k--) {
       const h = inFlight[k];
       if (h.t <= now) {
         field.alive[h.cell.x][h.cell.y] = false;
+        if (h.split) spawnRocks(h);
         inFlight.splice(k, 1);
       }
     }
@@ -389,7 +520,7 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     let best = options[0];
     let bestScore = -Infinity;
     for (const o of options.slice(0, 28)) {
-      const score = visibleFrom(field.node(o.i, o.j)) - dist[id(o.i, o.j)] * 0.008 + rng() * 1.5;
+      const score = visibleFrom(field.node(o.i, o.j), t) - dist[id(o.i, o.j)] * 0.008 + rng() * 1.5;
       if (score > bestScore) {
         bestScore = score;
         best = o;
@@ -398,7 +529,11 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     return flyTo(best.i, best.j);
   };
 
-  const shoot = (aim: number, hit: { cell: Cell; dist: number }): Hit => {
+  /**
+   * Turns the ship and fires one bullet over `dist` pixels; returns when and where it lands.
+   * The ship keeps its place, so the time spent turning is part of the cost of the shot.
+   */
+  const fire = (aim: number, dist: number) => {
     const delta = wrapDelta(aim - angle);
     const dur = Math.max(gap, Math.abs(delta) / aimSpeed);
     angle += delta;
@@ -407,30 +542,67 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     const dx = Math.cos(aim);
     const dy = Math.sin(aim);
     const from = { x: pos.x + dx * NOSE, y: pos.y + dy * NOSE };
-    const to = { x: pos.x + dx * hit.dist, y: pos.y + dy * hit.dist };
-    const flight = Math.max(0.02, (hit.dist - NOSE) / BULLET_SPEED);
+    const to = { x: pos.x + dx * dist, y: pos.y + dy * dist };
+    const flight = Math.max(0.02, (dist - NOSE) / BULLET_SPEED);
     bullets.push({ t0: t, t1: t + flight, from, to });
-    const h: Hit = { cell: hit.cell, t: t + flight, point: to, dir: aim };
-    hits.push(h);
-    inFlight.push(h);
-    reserved.add(hit.cell);
-    return h;
+    return { t: t + flight, point: to, dir: aim };
+  };
+
+  const rockClear = (aim: number, dist: number): boolean => {
+    const h = field.cast(pos, Math.cos(aim), Math.sin(aim));
+    return !h || h.dist > dist - 0.5;
+  };
+
+  /** Aim at where the rock will be when the bullet gets there, trying the middle and then each flank. */
+  const leadRock = (rock: Rock) => {
+    for (const side of [0, 0.7, -0.7]) {
+      let fireAt = t + gap;
+      let flight = 0.1;
+      let aim = 0;
+      let dist = 0;
+      for (let k = 0; k < 4; k++) {
+        const q = rockAt(rock, fireAt + flight);
+        const base = Math.atan2(q.y - pos.y, q.x - pos.x);
+        const reach = Math.hypot(q.x - pos.x, q.y - pos.y);
+        const tx = q.x - Math.sin(base) * ROCK_RADIUS * side;
+        const ty = q.y + Math.cos(base) * ROCK_RADIUS * side;
+        aim = Math.atan2(ty - pos.y, tx - pos.x);
+        dist = Math.max(NOSE + 2, reach - ROCK_RADIUS * 0.8);
+        fireAt = t + Math.max(gap, Math.abs(wrapDelta(aim - angle)) / aimSpeed);
+        flight = Math.max(0.02, (dist - NOSE) / BULLET_SPEED);
+      }
+      if (rockClear(aim, dist)) return { aim, dist };
+    }
+    return null;
   };
 
   const pickShot = (lastSign: number): Candidate | null => {
     let best: Candidate | null = null;
+    const loose = looseRocks(t).map((r) => ({ r, p: rockAt(r, t + 0.25) }));
     for (const c of liveCells()) {
       const [cx, cy] = cellCenter(layout, c.x, c.y);
       const len = Math.hypot(cx - pos.x, cy - pos.y);
       const hit = field.cast(pos, (cx - pos.x) / len, (cy - pos.y) / len);
       if (!hit || reserved.has(hit.cell)) continue;
       const aim = Math.atan2(cy - pos.y, cx - pos.x);
+      const end = { x: pos.x + Math.cos(aim) * hit.dist, y: pos.y + Math.sin(aim) * hit.dist };
+      if (loose.some(({ p }) => nearSegment(pos, end, p, ROCK_RADIUS + 1))) continue;
       const delta = wrapDelta(aim - angle);
       const reversal = Math.abs(delta) > 0.05 && Math.sign(delta) !== lastSign ? 0.12 : 0;
       const cost = Math.abs(delta) + reversal + hit.dist * 0.0004;
-      if (!best || cost < best.cost) best = { cell: hit.cell, dist: hit.dist, angle: aim, delta, cost };
+      if (!best || cost < best.cost) best = { cell: hit.cell, rock: null, dist: hit.dist, angle: aim, delta, cost };
     }
-    if (!best) return null;
+    for (const { r } of loose) {
+      if (r.ripe > t) continue;
+      const lead = leadRock(r);
+      if (!lead) continue;
+      const delta = wrapDelta(lead.aim - angle);
+      const reversal = Math.abs(delta) > 0.05 && Math.sign(delta) !== lastSign ? 0.12 : 0;
+      // Ripe rocks beat fresh targets so they are not left drifting about.
+      const cost = Math.abs(delta) + reversal + lead.dist * 0.0004 - 1.2;
+      if (!best || cost < best.cost) best = { cell: r.cell, rock: r, dist: lead.dist, angle: lead.aim, delta, cost };
+    }
+    if (!best || best.rock) return best;
     // A little scatter so the stream of shots doesn't look machined.
     const c = best.cell;
     const [cx, cy] = cellCenter(layout, c.x, c.y);
@@ -440,7 +612,7 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     const hit = field.cast(pos, ax / len, ay / len);
     if (hit && hit.cell === c) {
       const aim = Math.atan2(ay, ax);
-      return { cell: c, dist: hit.dist, angle: aim, delta: wrapDelta(aim - angle), cost: best.cost };
+      return { cell: c, rock: null, dist: hit.dist, angle: aim, delta: wrapDelta(aim - angle), cost: best.cost };
     }
     return best;
   };
@@ -450,11 +622,11 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     const wide = width / 2;
     const picks: { i: number; d: number }[] = [];
     for (let i = Math.round(W * 0.25); i <= Math.round(W * 0.75); i++) {
-      picks.push({ i, d: Math.abs(field.node(i, -1).x - pos.x) });
+      picks.push({ i, d: Math.abs(field.node(i, H).x - pos.x) });
     }
     picks.sort((a, b) => a.d - b.d);
     const spotI = picks[0].i;
-    flyTo(spotI, -1);
+    flyTo(spotI, H);
     const arrived = t;
     const spot = pos;
 
@@ -481,14 +653,15 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
 
     const early = sampleAt(approach - (tOut - fire1));
     const first = aimAt(early);
-    const reach = (first.m.y + 8) / -Math.sin(first.a);
+    // The first bullet is aimed behind the saucer and flies on until it runs out of range.
+    const reach = 260;
     segment(t, fire1, spot.x, spot.y, angle + wrapDelta(first.a - angle), TURN_EASE);
     angle += wrapDelta(first.a - angle);
     bullets.push({
       t0: fire1,
       t1: fire1 + reach / BULLET_SPEED,
       from: first.m,
-      to: { x: first.m.x + Math.cos(first.a) * reach, y: -8 },
+      to: { x: first.m.x + Math.cos(first.a) * reach, y: first.m.y + Math.sin(first.a) * reach },
     });
     segment(fire1, fire2, spot.x, spot.y, angle + wrapDelta(second.a - angle), "linear");
     angle += wrapDelta(second.a - angle);
@@ -516,7 +689,7 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
   let fired = 0;
   let sauced = false;
 
-  while (fired < total) {
+  while (fired < total || inFlight.length > 0 || rocks.some((r) => r.t1 === Infinity)) {
     land(t);
     if (!sauced && total >= 12 && fired >= Math.floor(total * 0.45)) {
       sauced = true;
@@ -526,24 +699,44 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     }
     const shot = pickShot(lastSign);
     if (!shot) {
-      t = Math.min(...inFlight.map((h) => h.t));
+      const waits = [...inFlight.map((h) => h.t), ...rocks.filter((r) => r.t1 === Infinity && r.ripe > t).map((r) => r.ripe)];
+      if (waits.length > 0) {
+        t = Math.min(...waits);
+        continue;
+      }
+      if (!relocate()) break;
+      spotShots = 0;
       continue;
     }
-    if (spotShots >= limit || (spotShots >= 2 && Math.abs(shot.delta) > 1.4)) {
+    if (!shot.rock && (spotShots >= limit || (spotShots >= 2 && Math.abs(shot.delta) > 1.4))) {
       relocate();
       spotShots = 0;
       limit = quota();
       continue;
     }
     const delta = shot.delta;
-    shoot(shot.angle, shot);
+    const shotAt = fire(shot.angle, shot.dist);
+    if (shot.rock) {
+      shot.rock.t1 = shotAt.t;
+      rockHits.push({ rock: shot.rock, t: shotAt.t, point: shotAt.point, dir: shotAt.dir });
+      clears.push({ t: shotAt.t, cell: { ...shot.cell, count: shot.rock.share } });
+    } else {
+      const split = splitting.has(shot.cell);
+      const h: Hit = { cell: shot.cell, t: shotAt.t, point: shotAt.point, dir: shotAt.dir, split };
+      hits.push(h);
+      inFlight.push(h);
+      reserved.add(shot.cell);
+      const share = split ? Math.floor(shot.cell.count / 3) : shot.cell.count;
+      clears.push({ t: h.t, cell: share === shot.cell.count ? shot.cell : { ...shot.cell, count: share } });
+      fired++;
+    }
     if (Math.abs(delta) > 0.01) lastSign = Math.sign(delta);
     spotShots++;
-    fired++;
   }
 
   let end = Math.max(t, lastEvent);
   for (const h of hits) end = Math.max(end, h.t);
+  for (const r of rockHits) end = Math.max(end, r.t);
   return {
     layout,
     width,
@@ -552,53 +745,75 @@ export function planAsteroids(grid: Grid, layout: Layout, seed: number, tempo: n
     burns,
     bullets,
     hits,
+    rocks,
+    rockHits,
+    clears,
     saucer,
-    play: Math.max(end + 0.25, 2.4),
+    play: Math.max(end + DEBRIS_LIFE, 2.4),
   };
 }
 
+function rockBox(width: number, height: number): Box {
+  return { x0: BOUNDS.left + 4, x1: width - BOUNDS.right - 4, y0: BOUNDS.top + 6, y1: height - BOUNDS.bottom - 4 };
+}
+
+/** Busy days that will split; on big graphs only as many as the play-length budget allows. */
+function chooseSplits(cells: Cell[], rng: Rng): Set<Cell> {
+  const eligible = cells.filter((c) => c.level >= 3 && c.count >= 3);
+  const room = Math.max(0, Math.floor((cells.length * (SHOT_BUDGET - 1) + 20) / 2));
+  const order = eligible.map((c) => ({ c, k: c.level + rng() * 1.5 })).sort((a, b) => b.k - a.k);
+  return new Set(order.slice(0, room).map((o) => o.c));
+}
+
 export function playAsteroids(ctx: GameContext): AsteroidsPlay {
-  const layout = makeLayout(ctx.grid, { left: MARGIN.left, top: MARGIN.top });
+  const layout = arcadeLayout(ctx.grid);
+  const size = { width: layout.width, height: layout.height };
   const seed = Math.floor(ctx.rng() * 2 ** 32);
   const n = activeCells(ctx.grid).length;
-  let tempo = n < 80 ? Math.max(0.55, n / 80) : 1;
-  let play = planAsteroids(ctx.grid, layout, seed, tempo);
+  let tempo = n < 80 ? Math.max(0.55, n / 80) : 1.5;
+  let play = planAsteroids(ctx.grid, layout, size, seed, tempo);
   while (play.play > MAX_PLAY && tempo < 4) {
     tempo *= 1.2;
-    play = planAsteroids(ctx.grid, layout, seed, tempo);
+    play = planAsteroids(ctx.grid, layout, size, seed, tempo);
   }
   return play;
 }
 
-// 5x7 pixel capitals for the closing banner.
-const GLYPHS: Record<string, string[]> = {
-  G: [".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".###."],
-  A: [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-  M: ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
-  E: ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
-  C: [".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."],
-  L: ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
-  R: ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
-};
+const f1 = (n: number) => String(Math.round(n * 10) / 10);
 
-function glyphPath(rows: string[], px: number): string {
-  let d = "";
-  rows.forEach((row, y) => {
-    for (let x = 0; x < row.length; ) {
-      if (row[x] !== "#") {
-        x++;
-        continue;
-      }
-      let e = x;
-      while (e < row.length && row[e] === "#") e++;
-      d += `M${x * px} ${y * px}h${(e - x) * px}v${px}h${-(e - x) * px}z`;
-      x = e;
-    }
-  });
-  return d;
+const SLOTS = 16;
+const DRIFT_DISTS = [27, 16, 9];
+
+export function debrisBox(width: number, height: number): Box {
+  return { x0: BOUNDS.left + 4, x1: width - BOUNDS.right - 4, y0: BOUNDS.top + 4, y1: height - BOUNDS.bottom - 2 };
 }
 
-const f1 = (n: number) => String(Math.round(n * 10) / 10);
+/**
+ * Picks the direction slot and travel distance for a fragment starting at (x, y) so that
+ * it ends inside the box. A fragment headed for the edge is turned back in.
+ */
+export function driftPlan(x: number, y: number, vx: number, vy: number, b: Box): { slot: number; dist: number } {
+  const inside = (px: number, py: number) => px >= b.x0 && px <= b.x1 && py >= b.y0 && py <= b.y1;
+  const slotOf = (dx: number, dy: number) => ((Math.round((Math.atan2(dy, dx) / (Math.PI * 2)) * SLOTS) % SLOTS) + SLOTS) % SLOTS;
+  let dx = vx;
+  let dy = vy;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const slot = slotOf(dx, dy);
+    const a = (slot / SLOTS) * Math.PI * 2;
+    for (const dist of DRIFT_DISTS) {
+      if (inside(x + Math.cos(a) * dist, y + Math.sin(a) * dist)) return { slot, dist };
+    }
+    const last = DRIFT_DISTS[DRIFT_DISTS.length - 1];
+    if (attempt === 0) {
+      if (x + Math.cos(a) * last < b.x0 || x + Math.cos(a) * last > b.x1) dx = -dx;
+      if (y + Math.sin(a) * last < b.y0 || y + Math.sin(a) * last > b.y1) dy = -dy;
+    } else {
+      dx = (b.x0 + b.x1) / 2 - x;
+      dy = (b.y0 + b.y1) / 2 - y;
+    }
+  }
+  return { slot: slotOf((b.x0 + b.x1) / 2 - x, (b.y0 + b.y1) / 2 - y), dist: DRIFT_DISTS[DRIFT_DISTS.length - 1] };
+}
 
 /** A cell cracked into 2-4 jagged pieces that share their cut lines, each described around its own centroid. */
 function shatter(rng: Rng, size: number, count: number) {
@@ -660,6 +875,29 @@ function shatter(rng: Rng, size: number, count: number) {
   });
 }
 
+/** The corners of a rock after it has turned `deg` degrees, as points around its centre. */
+function rockCorners(rock: Rock, deg: number): Pt[] {
+  return rock.radii.map((r, k) => {
+    const a = (k * Math.PI) / 4 + ((rock.phi + deg) * Math.PI) / 180;
+    return { x: Math.cos(a) * r, y: Math.sin(a) * r };
+  });
+}
+
+/** A broken rock as three wedges, each described around its own centroid. */
+function rockWedges(rock: Rock, deg: number) {
+  const corners = rockCorners(rock, deg);
+  return [
+    [0, 1, 2],
+    [2, 3, 4, 5],
+    [5, 6, 7, 0],
+  ].map((idx) => {
+    const pts = [{ x: 0, y: 0 }, ...idx.map((k) => corners[k])];
+    const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+    return { cx, cy, points: pts.map((p) => `${f1(p.x - cx)},${f1(p.y - cy)}`).join(" ") };
+  });
+}
+
 function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
   const { theme, grid } = ctx;
   const { layout } = play;
@@ -672,33 +910,42 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
   const accent = theme.accent;
   const eps = 0.001;
   const body: string[] = [];
-  const defs: string[] = [];
+  const defs: string[] = [glowDefs(theme)];
+  const dbox = debrisBox(play.width, play.height);
 
-  const driftTime = 1.35;
   const driftFrames = (angle: number, dist: number, spin: number): Frame[] => {
     const out: Frame[] = [];
     for (const s of [0, 0.12, 0.3, 0.55, 1]) {
       const e = 1 - (1 - s) * (1 - s);
       const op = s < 0.4 ? 1 : 1 - (s - 0.4) / 0.6;
       out.push([
-        s * driftTime,
+        s * DEBRIS_LIFE,
         `transform:translate(${fmt(Math.cos(angle) * dist * e)}px,${fmt(Math.sin(angle) * dist * e)}px) rotate(${fmt(spin * e)}deg);opacity:${fmt(op)}`,
       ]);
     }
     return out;
   };
-  const SLOTS = 16;
-  const drift: string[] = [];
-  for (let slot = 0; slot < SLOTS; slot++) {
-    for (const dist of [15, 27]) {
-      for (const spin of [1, -1]) {
-        drift.push(tl.keyframes(driftFrames((slot / SLOTS) * Math.PI * 2, dist, spin * (170 + rng() * 150))));
-      }
+  const drifts = new Map<string, string>();
+  const driftClass = (x: number, y: number, vx: number, vy: number, at: number): string => {
+    const { slot, dist } = driftPlan(x, y, vx, vy, dbox);
+    const variant = Math.floor(rng() * 4);
+    const key = `${slot}:${dist}:${variant}`;
+    let name = drifts.get(key);
+    if (!name) {
+      const spin = (variant & 1 ? -1 : 1) * (variant & 2 ? 300 : 190);
+      name = tl.keyframes(driftFrames((slot / SLOTS) * Math.PI * 2, dist, spin));
+      drifts.set(key, name);
     }
-  }
+    return tl.useKeyframes(name, L(at));
+  };
+
   const burst = tl.keyframes([
     [0, "transform:scale(.35);opacity:1;animation-timing-function:ease-out"],
     [0.3, "transform:scale(1.9);opacity:0"],
+  ]);
+  const flash = tl.keyframes([
+    [0, "transform:scale(.5);opacity:1;animation-timing-function:ease-out"],
+    [0.16, "transform:scale(1.6);opacity:0"],
   ]);
   const implode = tl.keyframes([
     [0, "transform:scale(2.4);opacity:0;animation-timing-function:ease-in"],
@@ -710,24 +957,28 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
     [0.4, "transform:scale(2.4);opacity:0"],
   ]);
 
-  const rays = Array.from({ length: 8 }, (_, k) => {
-    const a = (k / 8) * Math.PI * 2 + 0.2;
-    return `M${f1(Math.cos(a) * 3)} ${f1(Math.sin(a) * 3)}L${f1(Math.cos(a) * (k % 2 ? 5.5 : 7.5))} ${f1(Math.sin(a) * (k % 2 ? 5.5 : 7.5))}`;
-  }).join("");
-  defs.push(`<path id="sp" d="${rays}" fill="none" stroke="${accent}" stroke-width="1.2" stroke-linecap="round"/>`);
-  defs.push(
-    `<g id="bl"><circle r="3.4" fill="${ink}" opacity=".28"/><circle r="1.7" fill="${ink}"/></g>`,
-  );
-  defs.push(`<path id="sh" d="M8 0L-6 -5L-3.4 0L-6 5Z"/>`);
-  defs.push(`<path id="ufo" d="M-10 1.5L-4.5 -1.8H4.5L10 1.5ZM-10 1.5L-4.5 4.6H4.5L10 1.5ZM-3.6 -1.8L-2 -5H2L3.6 -1.8"/>`);
+  const rays = (count: number, near: number, far: (k: number) => number, turn: number) =>
+    Array.from({ length: count }, (_, k) => {
+      const a = (k / count) * Math.PI * 2 + turn;
+      const r = far(k);
+      return `M${f1(Math.cos(a) * near)} ${f1(Math.sin(a) * near)}L${f1(Math.cos(a) * r)} ${f1(Math.sin(a) * r)}`;
+    }).join("");
+  defs.push(`<path id="sp" d="${rays(8, 3, (k) => (k % 2 ? 6 : 8.5), 0.2)}" fill="none" stroke="${ink}" stroke-width="1.5" stroke-linecap="round"/>`);
+  defs.push(`<path id="se" d="${rays(8, 2.5, () => 5.5, 0.2 + Math.PI / 8)}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`);
+  defs.push(`<g id="bl"><circle r="4.2" fill="${ink}" opacity=".3"/><circle r="2.2" fill="${ink}"/></g>`);
+  defs.push(`<path id="sh" d="M11.2 0L-8.4 -7L-4.8 0L-8.4 7Z"/>`);
+  defs.push(`<path id="ufo" d="M-12 2L-5.5 -2.2H5.5L12 2ZM-12 2L-5.5 5.6H5.5L12 2ZM-4.4 -2.2L-2.4 -6H2.4L4.4 -2.2"/>`);
 
   const level = (cell: Cell) => levelColor(theme, cell);
   for (const hit of play.hits) {
     const c = hit.cell;
+    const at = L(hit.t);
     const frames: Frame[] = [
       [0, `fill:${level(c)}`],
-      [L(hit.t), `fill:${level(c)}`],
-      [L(hit.t) + eps, `fill:${theme.empty}`],
+      [at, `fill:${level(c)}`],
+      [at + eps, `fill:${ink}`],
+      [at + 0.07, `fill:${ink}`],
+      [at + 0.07 + eps, `fill:${theme.empty}`],
       [restore, `fill:${theme.empty}`],
       [restore + PACE.restore, `fill:${level(c)}`],
     ];
@@ -742,28 +993,78 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
   }
   body.unshift(...rest);
 
+  const spark = (x: number, y: number, scale: number, at: number, color: string) =>
+    `<g transform="translate(${f1(x)} ${f1(y)})${scale === 1 ? "" : ` scale(${scale})`}">` +
+    `<g class="${tl.useKeyframes(burst, L(at))}"><use href="#sp"/><use href="#se" color="${color}"/></g>` +
+    `<circle r="3.4" class="fl ${tl.useKeyframes(flash, L(at))}"/></g>`;
+
   const debris: string[] = [];
   const sparks: string[] = [];
+  const rocksOut: string[] = [];
   const bulletsOut: string[] = [];
   for (const hit of play.hits) {
     const c = hit.cell;
     const [cx, cy] = cellCenter(layout, c.x, c.y);
-    const count = c.level >= 4 ? 4 : c.level === 3 ? 3 : 2 + Math.floor(rng() * 2);
-    for (const piece of shatter(rng, layout.cell, count)) {
-      const outward = Math.atan2(piece.cy, piece.cx);
-      const vx = Math.cos(outward) * 0.7 + Math.cos(hit.dir) * 0.9;
-      const vy = Math.sin(outward) * 0.7 + Math.sin(hit.dir) * 0.9;
-      const slot = (Math.round((Math.atan2(vy, vx) / (Math.PI * 2)) * SLOTS) + SLOTS * 2) % SLOTS;
-      const variant = slot * 4 + (rng() < 0.5 ? 0 : 2) + (rng() < 0.5 ? 0 : 1);
-      const cls = tl.useKeyframes(drift[variant], L(hit.t));
+    if (!hit.split) {
+      const count = c.level >= 4 ? 4 : c.level === 3 ? 3 : 2 + Math.floor(rng() * 2);
+      for (const piece of shatter(rng, layout.cell, count)) {
+        const outward = Math.atan2(piece.cy, piece.cx);
+        const vx = Math.cos(outward) * 0.7 + Math.cos(hit.dir) * 0.9;
+        const vy = Math.sin(outward) * 0.7 + Math.sin(hit.dir) * 0.9;
+        const x = cx + piece.cx;
+        const y = cy + piece.cy;
+        debris.push(
+          `<g transform="translate(${f1(x)} ${f1(y)})"><polygon class="r${c.level} ${driftClass(x, y, vx, vy, hit.t)}" points="${piece.points}"/></g>`,
+        );
+      }
+    }
+    sparks.push(spark(hit.point.x, hit.point.y, hit.split ? 1.25 : 1, hit.t, theme.sprites[3]));
+  }
+
+  const hitOf = new Map(play.rockHits.map((h) => [h.rock, h]));
+  for (const r of play.rocks) {
+    const h = hitOf.get(r)!;
+    const life = r.t1 - r.t0;
+    const pose = (t: number, scale: number, opacity: number): string => {
+      const p = rockAt(r, t);
+      return `opacity:${opacity};transform:translate(${fmt(p.x)}px,${fmt(p.y)}px) scale(${scale})`;
+    };
+    const grow = Math.min(0.14, life);
+    const frames: Frame[] = [
+      [0, pose(r.t0, 0.5, 0)],
+      [L(r.t0), pose(r.t0, 0.5, 0)],
+      [L(r.t0) + eps, pose(r.t0, 0.5, 1)],
+      [L(r.t0 + grow), pose(r.t0 + grow, 1, 1)],
+      ...rockBounces(r, r.t1)
+        .filter((b) => b > r.t0 + grow)
+        .map((b): Frame => [L(b), pose(b, 1, 1)]),
+      [L(r.t1), pose(r.t1, 1, 1)],
+      [L(r.t1) + eps, pose(r.t1, 1, 0)],
+    ];
+    const turn = tl.track([
+      [L(r.t0), "transform:rotate(0deg)"],
+      [L(r.t1), `transform:rotate(${fmt(r.spin * life)}deg)`],
+    ]);
+    const points = rockCorners(r, 0).map((p) => `${f1(p.x)},${f1(p.y)}`).join(" ");
+    rocksOut.push(
+      `<g class="${tl.track(frames)}"><polygon class="rock ${turn}" fill="${spriteColor(theme, r.cell)}" points="${points}"/></g>`,
+    );
+
+    const end = rockAt(r, r.t1);
+    sparks.push(spark(h.point.x, h.point.y, 1.1, r.t1, theme.sprites[3]));
+    const heading = Math.atan2(r.vy, r.vx);
+    for (const w of rockWedges(r, r.spin * life)) {
+      const x = end.x + w.cx;
+      const y = end.y + w.cy;
+      const outward = Math.atan2(w.cy, w.cx);
+      const vx = Math.cos(outward) + Math.cos(heading) * 0.5;
+      const vy = Math.sin(outward) + Math.sin(heading) * 0.5;
       debris.push(
-        `<g transform="translate(${f1(cx + piece.cx)} ${f1(cy + piece.cy)})"><polygon class="r${c.level} ${cls}" points="${piece.points}"/></g>`,
+        `<g transform="translate(${f1(x)} ${f1(y)})"><polygon class="rock ${driftClass(x, y, vx, vy, r.t1)}" fill="${spriteColor(theme, r.cell)}" points="${w.points}"/></g>`,
       );
     }
-    sparks.push(
-      `<g transform="translate(${f1(hit.point.x)} ${f1(hit.point.y)})"><use href="#sp" class="${tl.useKeyframes(burst, L(hit.t))}"/></g>`,
-    );
   }
+
   for (const b of play.bullets) {
     const from = `transform:translate(${fmt(b.from.x)}px,${fmt(b.from.y)}px)`;
     const to = `transform:translate(${fmt(b.to.x)}px,${fmt(b.to.y)}px)`;
@@ -778,6 +1079,9 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
   }
 
   let saucerOut = "";
+  const ringAt = (p: Pt, kf: string, t: number, r = 15) =>
+    `<g transform="translate(${f1(p.x)} ${f1(p.y)})"><circle r="${r}" class="ring ${tl.useKeyframes(kf, t)}"/></g>`;
+  const rings: string[] = [];
   if (play.saucer) {
     const s = play.saucer;
     const pos = (p: { x: number; y: number }) => `transform:translate(${fmt(p.x)}px,${fmt(p.y)}px)`;
@@ -791,32 +1095,29 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
       [L(s.tOut) + eps, `opacity:0;${pos(last)}`],
     ];
     const cls = tl.track(frames);
-    saucerOut += `<g class="${cls}"><use href="#ufo" class="glow"/><use href="#ufo" class="line"/></g>`;
-    const at = `translate(${f1(last.x)} ${f1(last.y)})`;
-    saucerOut += `<g transform="${at} scale(1.35)"><use href="#sp" class="${tl.useKeyframes(burst, L(s.tOut))}"/></g>`;
-    for (let k = 0; k < 6; k++) {
-      const a = (k / 6) * Math.PI * 2 + 0.3 + rng() * 0.4;
-      const len = 3 + rng() * 3;
-      const slot = (Math.round((a / (Math.PI * 2)) * SLOTS) + SLOTS) % SLOTS;
-      const cls2 = tl.useKeyframes(drift[slot * 4 + 2 + (k % 2)], L(s.tOut));
-      saucerOut += `<g transform="${at} rotate(${f1((a * 180) / Math.PI)})"><path class="line ${cls2}" d="M${f1(-len)} 0H${f1(len)}"/></g>`;
+    saucerOut += `<g class="${cls}"><use href="#ufo" class="halo"/><use href="#ufo" class="line"/></g>`;
+    saucerOut += spark(last.x, last.y, 1.7, s.tOut, accent);
+    rings.push(ringAt(last, explode, L(s.tOut), 9));
+    for (let k = 0; k < 10; k++) {
+      const a = (k / 10) * Math.PI * 2 + 0.3 + rng() * 0.4;
+      const len = 3.5 + rng() * 3;
+      const x = last.x + Math.cos(a) * 3;
+      const y = last.y + Math.sin(a) * 3;
+      const cls2 = driftClass(x, y, Math.cos(a), Math.sin(a), s.tOut);
+      saucerOut += `<g transform="translate(${f1(x)} ${f1(y)}) rotate(${f1((a * 180) / Math.PI)})"><path class="${k % 2 ? "burn" : "line"} ${cls2}" d="M${f1(-len)} 0H${f1(len)}"/></g>`;
     }
   }
 
-  const poseFrames: Frame[] = play.poses.map((p) => [
-    L(p.t),
-    `transform:translate(${fmt(p.x)}px,${fmt(p.y)}px) rotate(${fmt((p.a * 180) / Math.PI)}deg);animation-timing-function:${p.ease}`,
-  ]);
+  const poseCss = (p: Pose, ease?: string) =>
+    `transform:translate(${fmt(p.x)}px,${fmt(p.y)}px) rotate(${fmt((p.a * 180) / Math.PI)}deg)${ease ? `;animation-timing-function:${ease}` : ""}`;
+  const poseFrames: Frame[] = play.poses.map((p) => [L(p.t), poseCss(p, p.ease)]);
   const first = play.poses[0];
   const last = play.poses[play.poses.length - 1];
   const warpIn = 0.2;
-  const spinAt = L(play.play) + 0.05;
-  const spinEnd = spinAt + 0.85;
-  const outAt = restore - 0.4;
-  poseFrames.push(
-    [spinAt, `transform:translate(${fmt(last.x)}px,${fmt(last.y)}px) rotate(${fmt((last.a * 180) / Math.PI)}deg);animation-timing-function:cubic-bezier(.3,.6,.3,1)`],
-    [spinEnd, `transform:translate(${fmt(last.x)}px,${fmt(last.y)}px) rotate(${fmt((last.a * 180) / Math.PI + 720)}deg)`],
-  );
+  const bannerFrom = L(play.play) + 0.05;
+  const bannerTo = restore - 0.3;
+  const outAt = restore - 0.25;
+  poseFrames.push([outAt + 0.38, poseCss(last)], [outAt + 0.381, poseCss(first)]);
   const move = tl.track(poseFrames);
 
   const flame: Frame[] = [[0, "opacity:0"]];
@@ -841,43 +1142,42 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
     shim(outAt + 0.34, 0, 3, 0.05),
   ]);
 
-  const ringAt = (p: Pt | Pose, kf: string, t: number) =>
-    `<g transform="translate(${f1(p.x)} ${f1(p.y)})"><circle r="12" class="ring ${tl.useKeyframes(kf, t)}"/></g>`;
-  const rings = ringAt(first, implode, warpIn) + ringAt(last, explode, outAt + 0.04);
+  rings.push(ringAt(first, implode, warpIn), ringAt(last, explode, outAt + 0.04));
 
   const ship =
     `<g class="${move}"><g class="${shimmer}">` +
-    `<g class="${flameCls}"><g transform="translate(-3.4 0)"><g class="flick"><path class="burn" d="M0 -2.4L-7 0L0 2.4"/><path class="burn" d="M0 -1L-3.6 0L0 1"/></g></g></g>` +
-    `<use href="#sh" class="glow"/><use href="#sh" class="line"/></g></g>`;
+    `<g transform="translate(-4.6 0)"><g class="flick"><path class="burn" opacity=".75" d="M0 -2.4L-5.5 0L0 2.4"/></g></g>` +
+    `<g class="${flameCls}"><g transform="translate(-4.6 0)"><g class="flick"><path class="burn" d="M0 -3.4L-10 0L0 3.4"/><path class="burn" d="M0 -1.4L-5.5 0L0 1.4"/></g></g></g>` +
+    `<use href="#sh" class="halo"/><use href="#sh" class="hull"/></g></g>`;
 
-  const px = 4;
-  const word = "GAME CLEAR";
-  const advance = (ch: string) => (ch === " " ? 3 * px : 6 * px);
-  const wordWidth = [...word].reduce((s, ch) => s + advance(ch), 0) - px;
-  const tx = layout.left + layout.gridWidth / 2 - wordWidth / 2;
-  const ty = layout.top + layout.gridHeight / 2 - (7 * px) / 2;
-  for (const ch of Object.keys(GLYPHS)) defs.push(`<path id="g${ch}" d="${glyphPath(GLYPHS[ch], px)}"/>`);
-  let text = "";
-  let cursor = tx;
-  let n = 0;
-  for (const ch of word) {
-    if (ch !== " ") {
-      const cls = tl.visible(L(play.play) + 0.2 + n * 0.055, restore + 0.1, 0.001);
-      text +=
-        `<g class="${cls}"><use href="#g${ch}" x="${f1(cursor + 2)}" y="${f1(ty + 2)}" fill="${accent}"/>` +
-        `<use href="#g${ch}" x="${f1(cursor)}" y="${f1(ty)}" fill="${ink}"/></g>`;
-      n++;
-    }
-    cursor += advance(ch);
-  }
+  const text = banner(tl, {
+    theme,
+    lines: stageClearLines(grid),
+    cx: layout.left + layout.gridWidth / 2,
+    cy: layout.top + layout.gridHeight / 2,
+    from: bannerFrom,
+    to: bannerTo,
+  });
 
+  const score = hud(tl, grid, {
+    theme,
+    title: "ASTEROIDS",
+    clears: play.clears.map((e) => ({ t: L(e.t), cell: e.cell })),
+    resetAt: restore,
+    width: play.width,
+  });
+
+  const glow = glowAttr(theme);
   const css = [
     tl.css(),
-    ...[1, 2, 3, 4].map((l) => `.r${l}{fill:${theme.levels[l - 1]};stroke:${ink};stroke-width:.9;stroke-linejoin:round;stroke-opacity:.85}`),
-    `.glow{fill:none;stroke:${ink};stroke-width:3.6;stroke-opacity:.2;stroke-linejoin:round;stroke-linecap:round}`,
-    `.line{fill:none;stroke:${ink};stroke-width:1.25;stroke-linejoin:round;stroke-linecap:round}`,
-    `.burn{fill:none;stroke:${accent};stroke-width:1.2;stroke-linejoin:round;stroke-linecap:round}`,
-    `.ring{fill:none;stroke:${ink};stroke-width:1;opacity:0}`,
+    ...[1, 2, 3, 4].map((l) => `.r${l}{fill:${spriteColor(theme, { level: l as 1 | 2 | 3 | 4 })};fill-opacity:.55;stroke:${ink};stroke-width:1;stroke-linejoin:round;stroke-opacity:.9}`),
+    `.rock{fill-opacity:.5;stroke:${ink};stroke-width:1.3;stroke-linejoin:round}`,
+    `.fl{fill:${ink};opacity:0}`,
+    `.halo{fill:none;stroke:${ink};stroke-width:4.4;stroke-opacity:.28;stroke-linejoin:round;stroke-linecap:round}`,
+    `.hull{fill:${ink};fill-opacity:.22;stroke:${ink};stroke-width:1.7;stroke-linejoin:round}`,
+    `.line{fill:none;stroke:${ink};stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}`,
+    `.burn{fill:none;stroke:${accent};stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}`,
+    `.ring{fill:none;stroke:${ink};stroke-width:1.2;opacity:0}`,
     `.flick{animation:flick .16s steps(1) infinite}`,
     `@keyframes flick{0%{transform:scale(1,1)}33%{transform:scale(.6,.75)}66%{transform:scale(1.25,1.1)}}`,
   ].join("\n");
@@ -887,7 +1187,17 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
     height: play.height,
     css,
     defs: defs.join(""),
-    body: [...body, ...debris, ...sparks, ...bulletsOut, saucerOut, rings, ship, text].join(""),
+    body: [
+      ...body,
+      score,
+      ...debris,
+      `<g${glow}>${rocksOut.join("")}</g>`,
+      `<g${glow}>${sparks.join("")}</g>`,
+      `<g${glow}>${bulletsOut.join("")}</g>`,
+      `<g${glow}>${saucerOut}${rings.join("")}</g>`,
+      `<g${glow}>${ship}</g>`,
+      text,
+    ].join(""),
   };
 }
 
