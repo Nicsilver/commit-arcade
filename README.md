@@ -1,96 +1,37 @@
-<h1 align="center">Commit Arcade</h1>
-
 <p align="center">
-  Your GitHub contribution graph, played as a classic arcade game.<br>
-  Ten games, rendered as animated SVGs you can drop into your profile README.
+  <img src="assets/banner.svg" width="100%" alt="Commit Arcade: 10 classic games on your contribution graph">
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/snake.svg">
-    <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/snake-light.svg" alt="A snake eating a contribution graph and growing with every commit">
-  </picture>
+  <a href="https://github.com/Nicsilver/commit-arcade/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Nicsilver/commit-arcade/ci.yml?branch=main&style=for-the-badge&label=build&color=7c5cff" alt="Build status"></a>
+  <img src="https://img.shields.io/badge/games-10-ff4df0?style=for-the-badge" alt="10 games">
+  <img src="https://img.shields.io/badge/JavaScript_in_the_SVGs-none-23f0ff?style=for-the-badge" alt="No JavaScript in the SVGs">
+  <img src="https://img.shields.io/badge/license-MIT-f5b53d?style=for-the-badge" alt="MIT license">
 </p>
 
-## The games
+<p align="center">
+  <b>Your GitHub contribution graph, played as a classic arcade game.</b><br>
+  Snake, Pac-Man, Breakout, Space Invaders, Asteroids, Tetris, Bomberman, Galaga, Centipede and Tron,<br>
+  each simulated on your real graph and rendered as an animated SVG for your profile README.
+</p>
 
-| Game | What happens |
-| --- | --- |
-| `snake` | The snake eats your contributions and grows with every one. Each body segment keeps the colour of the day it ate. |
-| `pacman` | Pac-Man clears the graph while four ghosts give chase. Power pellets sit in the corners, and the maze flashes when the board is clear. |
-| `breakout` | Your days are bricks. Busy days crack before they break, and a fireball finishes the wall. |
-| `invaders` | Every contribution is an invader marching in formation. Bunkers, bombs and a mystery ship included. |
-| `asteroids` | The ship warps in and shoots your graph apart. Busy days split into drifting rocks first. |
-| `tetris` | Your graph drops into a stack, tetrominoes fill the gaps and the lines clear. Ends on a Tetris when the board allows it. |
-| `bomberman` | Days are soft blocks. Bomberman plants bombs, runs for cover and picks up power-ups along the way. |
-| `galaga` | Your days are the enemy formation. Dive attacks, a tractor-beam capture and the dual fighter rescue. |
-| `centipede` | Your contributions are the mushroom field. Shoot the centipede and it splits, leaving new mushrooms behind. |
-| `tron` | Two light cycles race for your days and derez every one they touch. Only one of them makes it to the end. |
-| `daily` | A different game every day, picked from the date. |
+<p align="center">
+  <a href="#insert-coin">Insert coin</a> ·
+  <a href="#the-games">The games</a> ·
+  <a href="#options">Options</a> ·
+  <a href="#how-it-works">How it works</a>
+</p>
 
-<details>
-<summary>See them all</summary>
+<br>
 
-### Pac-Man
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/pacman.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/pacman-light.svg" alt="Pac-Man on a contribution graph">
-</picture>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/neon.svg" width="100%" alt="Today's game in the neon theme">
+</p>
+<p align="center"><sub>Today's game on my own graph, in the <code>neon</code> theme. It changes every day.</sub></p>
 
-### Breakout
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/breakout.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/breakout-light.svg" alt="Breakout on a contribution graph">
-</picture>
+## Insert coin
 
-### Space Invaders
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/invaders.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/invaders-light.svg" alt="Space Invaders on a contribution graph">
-</picture>
-
-### Asteroids
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/asteroids.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/asteroids-light.svg" alt="Asteroids on a contribution graph">
-</picture>
-
-### Tetris
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tetris.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tetris-light.svg" alt="Tetris on a contribution graph">
-</picture>
-
-### Bomberman
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/bomberman.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/bomberman-light.svg" alt="Bomberman on a contribution graph">
-</picture>
-
-### Galaga
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/galaga.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/galaga-light.svg" alt="Galaga on a contribution graph">
-</picture>
-
-### Centipede
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/centipede.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/centipede-light.svg" alt="Centipede on a contribution graph">
-</picture>
-
-### Tron
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tron.svg">
-  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tron-light.svg" alt="Tron on a contribution graph">
-</picture>
-
-### Neon theme
-<img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/neon.svg" alt="Today's game in the neon theme">
-
-</details>
-
-## Put it on your profile
+Three steps, GitHub only, nothing to host.
 
 1. Create `.github/workflows/arcade.yml` in your profile repo (the one named after your username):
 
@@ -134,7 +75,107 @@ jobs:
 </picture>
 ```
 
-Want one game every day instead of a rotation? Swap `game=daily` for one game: `snake`, `pacman`, `breakout`, `invaders`, `asteroids`, `tetris`, `bomberman`, `galaga`, `centipede`, `tron`. You can list as many outputs as you like.
+Want the same game every day instead of a rotation? Swap `game=daily` for one game: `snake`, `pacman`, `breakout`, `invaders`, `asteroids`, `tetris`, `bomberman`, `galaga`, `centipede`, `tron`. You can list as many outputs as you like.
+
+## The games
+
+Every game ends the same way: an empty board, a STAGE CLEAR card and a score equal to your contributions for the year.
+
+### 01 · Snake <sub><code>game=snake</code></sub>
+
+The snake eats your contributions and grows with every one. Each body segment keeps the colour of the day it came from, and it speeds up for the finish.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/snake.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/snake-light.svg" width="100%" alt="Snake played on a contribution graph">
+</picture>
+
+### 02 · Pac-Man <sub><code>game=pacman</code></sub>
+
+Pac-Man clears the graph while Blinky, Pinky, Inky and Clyde give chase. Power pellets sit in the corners, ghosts are worth 200 to 1600, and the maze flashes when the board is clear.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/pacman.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/pacman-light.svg" width="100%" alt="Pac-Man played on a contribution graph">
+</picture>
+
+### 03 · Breakout <sub><code>game=breakout</code></sub>
+
+Your days are the wall. Busy days crack before they break, chips fly, and a fireball smashes through the last third.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/breakout.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/breakout-light.svg" width="100%" alt="Breakout played on a contribution graph">
+</picture>
+
+### 04 · Space Invaders <sub><code>game=invaders</code></sub>
+
+Every contribution is an invader marching in formation. Bunkers, zigzag bombs and the mystery ship included.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/invaders.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/invaders-light.svg" width="100%" alt="Space Invaders played on a contribution graph">
+</picture>
+
+### 05 · Asteroids <sub><code>game=asteroids</code></sub>
+
+The ship warps in and shoots your graph apart. Busy days split into drifting rocks first, and a flying saucer drops by.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/asteroids.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/asteroids-light.svg" width="100%" alt="Asteroids played on a contribution graph">
+</picture>
+
+### 06 · Tetris <sub><code>game=tetris</code></sub>
+
+Your graph settles into a stack, tetrominoes fill the gaps and the lines sweep away. It finishes on a Tetris when the board allows it.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tetris.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tetris-light.svg" width="100%" alt="Tetris played on a contribution graph">
+</picture>
+
+### 07 · Bomberman <sub><code>game=bomberman</code></sub>
+
+Days are soft blocks. Bomberman plants bombs, runs for cover, sets off chain reactions and picks up power-ups along the way.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/bomberman.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/bomberman-light.svg" width="100%" alt="Bomberman played on a contribution graph">
+</picture>
+
+### 08 · Galaga <sub><code>game=galaga</code></sub>
+
+Your days are the enemy formation. Looping dive attacks, the tractor-beam capture and the dual fighter rescue.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/galaga.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/galaga-light.svg" width="100%" alt="Galaga played on a contribution graph">
+</picture>
+
+### 09 · Centipede <sub><code>game=centipede</code></sub>
+
+Your contributions are the mushroom field. Shoot the centipede and it splits, leaving new mushrooms behind. Watch out for the flea and the spider.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/centipede.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/centipede-light.svg" width="100%" alt="Centipede played on a contribution graph">
+</picture>
+
+### 10 · Tron <sub><code>game=tron</code></sub>
+
+Two light cycles race for your days and derez every one they touch. They cut each other off until only one is left.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tron.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tron-light.svg" width="100%" alt="Tron played on a contribution graph">
+</picture>
+
+### Neon <sub><code>theme=neon</code></sub>
+
+Any game on its own dark cabinet with a stronger glow, like the one at the top. The `github-dark` and `github-light` themes are transparent, so they sit on your profile like the real graph.
+
+And `game=daily` picks a different one every day, so your profile is never the same two days running.
 
 ## Options
 
