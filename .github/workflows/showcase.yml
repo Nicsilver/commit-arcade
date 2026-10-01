@@ -30,6 +30,16 @@ jobs:
             out/invaders-light.svg?game=invaders&theme=github-light
             out/asteroids.svg?game=asteroids&theme=github-dark
             out/asteroids-light.svg?game=asteroids&theme=github-light
+            out/tetris.svg?game=tetris&theme=github-dark
+            out/tetris-light.svg?game=tetris&theme=github-light
+            out/bomberman.svg?game=bomberman&theme=github-dark
+            out/bomberman-light.svg?game=bomberman&theme=github-light
+            out/galaga.svg?game=galaga&theme=github-dark
+            out/galaga-light.svg?game=galaga&theme=github-light
+            out/centipede.svg?game=centipede&theme=github-dark
+            out/centipede-light.svg?game=centipede&theme=github-light
+            out/tron.svg?game=tron&theme=github-dark
+            out/tron-light.svg?game=tron&theme=github-light
             out/neon.svg?game=daily&theme=neon
       - name: Publish to the output branch
         run: |

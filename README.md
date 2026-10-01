@@ -2,7 +2,7 @@
 
 <p align="center">
   Your GitHub contribution graph, played as a classic arcade game.<br>
-  Five games, rendered as animated SVGs you can drop into your profile README.
+  Ten games, rendered as animated SVGs you can drop into your profile README.
 </p>
 
 <p align="center">
@@ -17,10 +17,15 @@
 | Game | What happens |
 | --- | --- |
 | `snake` | The snake eats your contributions and grows with every one. Each body segment keeps the colour of the day it ate. |
-| `pacman` | Pac-Man clears the graph while four ghosts give chase. Your busiest days are power pellets. |
-| `breakout` | Your days are bricks. Busy days take two hits, and a fireball finishes the wall. |
-| `invaders` | Every contribution is an invader marching in formation. The laser cannon takes them down column by column. |
-| `asteroids` | The ship warps in and shoots your graph apart, one cracked rock at a time. |
+| `pacman` | Pac-Man clears the graph while four ghosts give chase. Power pellets sit in the corners, and the maze flashes when the board is clear. |
+| `breakout` | Your days are bricks. Busy days crack before they break, and a fireball finishes the wall. |
+| `invaders` | Every contribution is an invader marching in formation. Bunkers, bombs and a mystery ship included. |
+| `asteroids` | The ship warps in and shoots your graph apart. Busy days split into drifting rocks first. |
+| `tetris` | Your graph drops into a stack, tetrominoes fill the gaps and the lines clear. Ends on a Tetris when the board allows it. |
+| `bomberman` | Days are soft blocks. Bomberman plants bombs, runs for cover and picks up power-ups along the way. |
+| `galaga` | Your days are the enemy formation. Dive attacks, a tractor-beam capture and the dual fighter rescue. |
+| `centipede` | Your contributions are the mushroom field. Shoot the centipede and it splits, leaving new mushrooms behind. |
+| `tron` | Two light cycles race for your days and derez every one they touch. Only one of them makes it to the end. |
 | `daily` | A different game every day, picked from the date. |
 
 <details>
@@ -48,6 +53,36 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/asteroids.svg">
   <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/asteroids-light.svg" alt="Asteroids on a contribution graph">
+</picture>
+
+### Tetris
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tetris.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tetris-light.svg" alt="Tetris on a contribution graph">
+</picture>
+
+### Bomberman
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/bomberman.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/bomberman-light.svg" alt="Bomberman on a contribution graph">
+</picture>
+
+### Galaga
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/galaga.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/galaga-light.svg" alt="Galaga on a contribution graph">
+</picture>
+
+### Centipede
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/centipede.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/centipede-light.svg" alt="Centipede on a contribution graph">
+</picture>
+
+### Tron
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tron.svg">
+  <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tron-light.svg" alt="Tron on a contribution graph">
 </picture>
 
 ### Neon theme
@@ -99,7 +134,7 @@ jobs:
 </picture>
 ```
 
-Want one game every day instead of a rotation? Swap `game=daily` for `game=snake`, `pacman`, `breakout`, `invaders` or `asteroids`. You can list as many outputs as you like.
+Want one game every day instead of a rotation? Swap `game=daily` for one game: `snake`, `pacman`, `breakout`, `invaders`, `asteroids`, `tetris`, `bomberman`, `galaga`, `centipede`, `tron`. You can list as many outputs as you like.
 
 ## Options
 
@@ -111,12 +146,13 @@ dist/arcade.svg?game=pacman&theme=neon&accent=#ff4df0
 
 | Option | Values | Default |
 | --- | --- | --- |
-| `game` | `snake`, `pacman`, `breakout`, `invaders`, `asteroids`, `daily` | `snake` |
+| `game` | `snake`, `pacman`, `breakout`, `invaders`, `asteroids`, `tetris`, `bomberman`, `galaga`, `centipede`, `tron`, `daily` | `snake` |
 | `theme` | `github-dark`, `github-light`, `neon` | `github-dark` |
 | `background` | a colour, or `none` for transparent | from theme |
 | `empty` | colour of days without contributions | from theme |
 | `levels` | four comma-separated colours, light to heavy | from theme |
-| `ink`, `muted`, `accent` | colours for sprites and text | from theme |
+| `sprites` | four comma-separated colours for sprites made from days | follows `levels` |
+| `ink`, `muted`, `accent`, `surface` | colours for text, the player and banners | from theme |
 
 Action inputs:
 
@@ -139,7 +175,9 @@ No dependencies at runtime. Node 22.18 or newer.
 
 ## How it works
 
-Each game is simulated on your actual graph first: the snake does pathfinding without biting itself, the Breakout paddle aims its returns at bricks that are left, the invaders get shot column by column. The simulation records when everything moves, and that timeline is compiled into CSS keyframes on one shared loop. There's no JavaScript in the SVGs, so GitHub renders them as plain images.
+Each game is simulated on your actual graph first: the snake does pathfinding without biting itself, the Breakout paddle aims its returns at bricks that are left, the invaders get shot column by column, Tetris only makes legal drops, and Bomberman never stands in a blast. The simulation records when everything moves, and that timeline is compiled into CSS keyframes on one shared loop. There's no JavaScript in the SVGs, so GitHub renders them as plain images.
+
+The score at the top counts your contributions as the game clears them, so every run ends on your total for the year.
 
 The same graph always plays the same game, so the image only changes when your contributions do.
 

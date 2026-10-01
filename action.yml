@@ -16,9 +16,11 @@ inputs:
     description: |
       One file per line, with options as a query string, e.g.
         dist/snake.svg?game=snake&theme=github-dark
-      game: snake, pacman, breakout, invaders, asteroids or daily (rotates every day)
+      game: snake, pacman, breakout, invaders, asteroids, tetris, bomberman,
+        galaga, centipede, tron, or daily (rotates every day)
       theme: github-dark, github-light or neon
-      colours: background, empty, ink, muted, accent, levels (4 comma-separated)
+      colours: background, empty, ink, muted, accent, surface,
+        levels and sprites (4 comma-separated each)
     required: true
 
 runs:
