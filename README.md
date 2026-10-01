@@ -5,14 +5,12 @@
 <p align="center">
   <a href="https://github.com/Nicsilver/commit-arcade/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Nicsilver/commit-arcade/ci.yml?branch=main&style=for-the-badge&label=build&color=7c5cff" alt="Build status"></a>
   <img src="https://img.shields.io/badge/games-10-ff4df0?style=for-the-badge" alt="10 games">
-  <img src="https://img.shields.io/badge/JavaScript_in_the_SVGs-none-23f0ff?style=for-the-badge" alt="No JavaScript in the SVGs">
   <img src="https://img.shields.io/badge/license-MIT-f5b53d?style=for-the-badge" alt="MIT license">
 </p>
 
 <p align="center">
   <b>Your GitHub contribution graph, played as a classic arcade game.</b><br>
-  Snake, Pac-Man, Breakout, Space Invaders, Asteroids, Tetris, Bomberman, Galaga, Centipede and Tron,<br>
-  each simulated on your real graph and rendered as an animated SVG for your profile README.
+  Ten games, rendered as animated SVGs for your profile README.
 </p>
 
 <p align="center">
@@ -27,11 +25,11 @@
 <p align="center">
   <img src="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/neon.svg" width="100%" alt="Today's game in the neon theme">
 </p>
-<p align="center"><sub>Today's game on my own graph, in the <code>neon</code> theme. It changes every day.</sub></p>
+<p align="center"><sub>Today's game on my graph, in the <code>neon</code> theme.</sub></p>
 
 ## Insert coin
 
-Three steps, GitHub only, nothing to host.
+Everything runs in GitHub Actions in your profile repo.
 
 1. Create `.github/workflows/arcade.yml` in your profile repo (the one named after your username):
 
@@ -79,11 +77,11 @@ Want the same game every day instead of a rotation? Swap `game=daily` for one ga
 
 ## The games
 
-Every game ends the same way: an empty board, a STAGE CLEAR card and a score equal to your contributions for the year.
+Each game plays until your graph is cleared. The score counts your contributions as they go.
 
 ### 01 · Snake <sub><code>game=snake</code></sub>
 
-The snake eats your contributions and grows with every one. Each body segment keeps the colour of the day it came from, and it speeds up for the finish.
+The snake eats your contributions and grows with each one. Body segments keep the colour of the day they came from.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/snake.svg">
@@ -92,7 +90,7 @@ The snake eats your contributions and grows with every one. Each body segment ke
 
 ### 02 · Pac-Man <sub><code>game=pacman</code></sub>
 
-Pac-Man clears the graph while Blinky, Pinky, Inky and Clyde give chase. Power pellets sit in the corners, ghosts are worth 200 to 1600, and the maze flashes when the board is clear.
+Pac-Man clears the graph while the four ghosts chase him. Power pellets sit in the corners and the maze flashes when the board is clear.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/pacman.svg">
@@ -101,7 +99,7 @@ Pac-Man clears the graph while Blinky, Pinky, Inky and Clyde give chase. Power p
 
 ### 03 · Breakout <sub><code>game=breakout</code></sub>
 
-Your days are the wall. Busy days crack before they break, chips fly, and a fireball smashes through the last third.
+Your days are the bricks. Busy days take two hits, and a fireball takes over for the last third.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/breakout.svg">
@@ -110,7 +108,7 @@ Your days are the wall. Busy days crack before they break, chips fly, and a fire
 
 ### 04 · Space Invaders <sub><code>game=invaders</code></sub>
 
-Every contribution is an invader marching in formation. Bunkers, zigzag bombs and the mystery ship included.
+Every contribution is an invader marching in formation, with bunkers, bombs and the mystery ship.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/invaders.svg">
@@ -119,7 +117,7 @@ Every contribution is an invader marching in formation. Bunkers, zigzag bombs an
 
 ### 05 · Asteroids <sub><code>game=asteroids</code></sub>
 
-The ship warps in and shoots your graph apart. Busy days split into drifting rocks first, and a flying saucer drops by.
+The ship shoots your graph apart. Busy days split into drifting rocks first, and a flying saucer crosses once.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/asteroids.svg">
@@ -137,7 +135,7 @@ Your graph settles into a stack, tetrominoes fill the gaps and the lines sweep a
 
 ### 07 · Bomberman <sub><code>game=bomberman</code></sub>
 
-Days are soft blocks. Bomberman plants bombs, runs for cover, sets off chain reactions and picks up power-ups along the way.
+Days are soft blocks. Bomberman plants bombs, gets out of the way and picks up power-ups.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/bomberman.svg">
@@ -146,7 +144,7 @@ Days are soft blocks. Bomberman plants bombs, runs for cover, sets off chain rea
 
 ### 08 · Galaga <sub><code>game=galaga</code></sub>
 
-Your days are the enemy formation. Looping dive attacks, the tractor-beam capture and the dual fighter rescue.
+Your days are the enemy formation, with dive attacks, the tractor beam and the dual fighter.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/galaga.svg">
@@ -155,7 +153,7 @@ Your days are the enemy formation. Looping dive attacks, the tractor-beam captur
 
 ### 09 · Centipede <sub><code>game=centipede</code></sub>
 
-Your contributions are the mushroom field. Shoot the centipede and it splits, leaving new mushrooms behind. Watch out for the flea and the spider.
+Your contributions are the mushroom field. Shoot the centipede and it splits, leaving new mushrooms behind. The flea and the spider show up too.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/centipede.svg">
@@ -164,7 +162,7 @@ Your contributions are the mushroom field. Shoot the centipede and it splits, le
 
 ### 10 · Tron <sub><code>game=tron</code></sub>
 
-Two light cycles race for your days and derez every one they touch. They cut each other off until only one is left.
+Two light cycles race for your days and derez the ones they ride over. One of them crashes at the end.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Nicsilver/commit-arcade/output/tron.svg">
@@ -173,9 +171,9 @@ Two light cycles race for your days and derez every one they touch. They cut eac
 
 ### Neon <sub><code>theme=neon</code></sub>
 
-Any game on its own dark cabinet with a stronger glow, like the one at the top. The `github-dark` and `github-light` themes are transparent, so they sit on your profile like the real graph.
+Any game with its own dark background and a stronger glow, like the one at the top. The `github-dark` and `github-light` themes use GitHub's own colours and a transparent background.
 
-And `game=daily` picks a different one every day, so your profile is never the same two days running.
+`game=daily` picks a different game each day.
 
 ## Options
 
@@ -216,11 +214,11 @@ No dependencies at runtime. Node 22.18 or newer.
 
 ## How it works
 
-Each game is simulated on your actual graph first: the snake does pathfinding without biting itself, the Breakout paddle aims its returns at bricks that are left, the invaders get shot column by column, Tetris only makes legal drops, and Bomberman never stands in a blast. The simulation records when everything moves, and that timeline is compiled into CSS keyframes on one shared loop. There's no JavaScript in the SVGs, so GitHub renders them as plain images.
+Each game is simulated on your graph first. The simulation records when every sprite moves, and that is written out as CSS keyframes in an SVG. There's no JavaScript in the image, so GitHub shows it like any other picture.
 
-The score at the top counts your contributions as the game clears them, so every run ends on your total for the year.
+The score counts your contributions as the game clears them, so it ends on your total for the year.
 
-The same graph always plays the same game, so the image only changes when your contributions do.
+The same graph always plays out the same way, so the image only changes when your contributions do.
 
 ## Development
 
@@ -231,7 +229,7 @@ npm run demo     # renders every game on a sample graph into demo/
 npm run build    # bundles dist/, which the action runs from
 ```
 
-Inspired by [Platane/snk](https://github.com/Platane/snk), the snake that started it all.
+Inspired by [Platane/snk](https://github.com/Platane/snk).
 
 ## License
 

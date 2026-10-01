@@ -5883,7 +5883,7 @@ function simulateSnake(grid, coda = () => 0) {
 var BODY = 13;
 var OUTLINE2 = 1.5;
 var HEAD = 16;
-var TAPER = [0.6, 0.72, 0.84, 0.93];
+var TAPER = [0.6, 0.64, 0.7, 0.76, 0.82, 0.88, 0.93, 0.97];
 var POP = 0.22;
 var SPEED_UP_AT = 0.55;
 var SPEED_UP_RATIO = 0.55;
@@ -6002,13 +6002,25 @@ function render7(ctx) {
   ]);
   const growth = sim.eats.filter((e) => e.grew);
   const growTime = (m) => at(growth[m - 1].step);
-  const taperShape = (j) => j < TAPER.length ? TAPER[j] : 1;
+  const taperShape = (e) => e < TAPER.length ? TAPER[e] : 1;
   const rim = dark ? theme.surface : theme.ink;
   const rimOpacity = dark ? 1 : 0.8;
+  const pitch = Math.abs(px(1)[0] - px(0)[0]);
+  const reach = Math.ceil(lastStep * pitch) + pitch;
+  const route = [];
+  for (let k = 0; k <= lastStep; k++) {
+    if (k === 0 || k === lastStep || dirs[k - 1] !== dirs[k]) {
+      const [x, y] = px(sim.path[k]);
+      route.push(`${route.length ? "L" : "M"}${fmt(x)} ${fmt(y)}`);
+    }
+  }
+  const dash = pitch / 2;
+  const along = (steps) => `stroke-dashoffset:${fmt(dash / 2 - steps * pitch)}px`;
   const copies = phases.map((phase, j) => {
     const lo = j === 0 ? 0 : Math.max(0, phase.from - growth.length - 2);
     const hi = j + 1 < phases.length ? phases[j + 1].from : lastStep;
-    const frames2 = moveFrames(lo, hi, (k) => atIn(j, k)).filter(([t]) => t >= 0);
+    const tLo = atIn(j, lo);
+    const frames2 = tLo >= 0 ? [[tLo, along(lo)], [atIn(j, hi), along(hi)]] : [[0, along(lo - tLo / phase.s)], [atIn(j, hi), along(hi)]];
     return { track: tl.keyframes(frames2), s: phase.s };
   });
   const gates = copies.map((_, j) => {
@@ -6021,30 +6033,34 @@ function render7(ctx) {
   const tube = copies.map(() => []);
   const shadow = copies.map(() => []);
   for (let i = growth.length; i >= 1; i--) {
-    const frames2 = [[0, "opacity:0;transform:scale(.2)"]];
-    for (let j = 0; j <= TAPER.length; j++) {
-      const m = i + j;
-      if (m > growth.length) break;
-      const start = growTime(m);
-      const next = m + 1 <= growth.length ? growTime(m + 1) : Infinity;
-      const end2 = Math.min(start + POP, next);
-      const from = j === 0 ? "opacity:0;transform:scale(.2)" : `opacity:1;transform:scale(${fmt(taperShape(j - 1))})`;
-      const to = `opacity:1;transform:scale(${fmt(taperShape(j))})`;
-      frames2.push([start, from], [end2, to]);
-    }
-    frames2.push([fadeEnd, frames2[frames2.length - 1][1]], [fadeEnd + 0.01, "opacity:0"]);
-    const look = tl.track(frames2);
+    const look = (size, odd) => {
+      const width2 = (scale) => `stroke-width:${fmt(size * scale)}`;
+      const frames2 = [[0, `opacity:0;${width2(0.2)}`]];
+      for (let j = 0; 2 * j <= TAPER.length; j++) {
+        const m = i + j;
+        if (m > growth.length) break;
+        const start = growTime(m);
+        const next = m + 1 <= growth.length ? growTime(m + 1) : Infinity;
+        const end2 = Math.min(start + POP, next);
+        const from = j === 0 ? `opacity:0;${width2(0.2)}` : `opacity:1;${width2(taperShape(2 * j - 2 + odd))}`;
+        frames2.push([start, from], [end2, `opacity:1;${width2(taperShape(2 * j + odd))}`]);
+      }
+      frames2.push([fadeEnd, frames2[frames2.length - 1][1]], [fadeEnd + 0.01, "opacity:0"]);
+      return tl.track(frames2);
+    };
+    const looks = [look(BODY, 0), look(BODY, 1), look(BODY + 2 * OUTLINE2, 0), look(BODY + 2 * OUTLINE2, 1)];
     const fill = spriteColor(theme, growth[i - 1].cell);
     const joint = i === 1 ? fill : mixColors2(spriteColor(theme, growth[i - 2].cell), fill);
     copies.forEach((copy, j) => {
       const pos = tl.useKeyframes(copy.track, i * copy.s);
       const bridge = tl.useKeyframes(copy.track, (i - 0.5) * copy.s);
-      const piece = (cls, size, color) => `<g class="${cls}"><rect class="${look}" x="${fmt(-size / 2)}" y="${fmt(-size / 2)}" width="${size}" height="${size}" rx="${fmt(size * 0.32)}" fill="${color}"/></g>`;
-      tube[j].push(piece(pos, BODY, fill), piece(bridge, BODY, joint));
-      shadow[j].push(piece(pos, BODY + 2 * OUTLINE2, rim), piece(bridge, BODY + 2 * OUTLINE2, rim));
+      const piece = (look2, cls, color) => `<g class="${look2}"><use class="${cls}" href="#body-route" stroke="${color}"/></g>`;
+      tube[j].push(piece(looks[0], pos, fill), piece(looks[1], bridge, joint));
+      shadow[j].push(piece(looks[2], pos, rim), piece(looks[3], bridge, rim));
     });
   }
   const gated = (parts) => parts.map((p, j) => gates[j] ? `<g class="${gates[j]}">${p.join("")}</g>` : p.join("")).join("");
+  const dashing = `stroke-dasharray="${fmt(dash)} ${reach}"`;
   const baseCells = [];
   const foodCells = [];
   const pops = [];
@@ -6093,7 +6109,7 @@ function render7(ctx) {
     return `<circle cx="${fmt(Math.cos(a) * radius)}" cy="${fmt(Math.sin(a) * radius)}" r="${size}" fill="${fill}"/>`;
   }).join("");
   const flash = dark ? "#ffffff" : theme.accent;
-  const defs = glowDefs(theme) + `<g id="pop"><circle r="7" fill="none" stroke="${flash}" stroke-width="1.4"/>${spark(8, 7, 1.7)}</g><g id="pop-big"><circle r="8" fill="none" stroke="${flash}" stroke-width="2"/><circle r="5" fill="none" stroke="${theme.accent}" stroke-width="2"/>${spark(12, 8, 2.1)}</g>`;
+  const defs = glowDefs(theme) + `<g id="pop"><circle r="7" fill="none" stroke="${flash}" stroke-width="1.4"/>${spark(8, 7, 1.7)}</g>` + (growth.length > 0 ? `<path id="body-route" d="${route.join("")}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>` : "") + `<g id="pop-big"><circle r="8" fill="none" stroke="${flash}" stroke-width="2"/><circle r="5" fill="none" stroke="${theme.accent}" stroke-width="2"/>${spark(12, 8, 2.1)}</g>`;
   const clears = sim.eats.map((e) => ({ t: at(e.step), cell: e.cell }));
   const bar = hud(tl, grid, { theme, title: "SNAKE", clears, resetAt: restore, width });
   const end = hasPlay ? banner(tl, {
@@ -6113,7 +6129,7 @@ function render7(ctx) {
   const bodyMarkup = [
     `<g>${baseCells.join("")}</g>`,
     `<g>${foodCells.join("")}</g>`,
-    `<g class="${snakeFade}"${glowAttr(theme)}><g opacity="${rimOpacity}">${gated(shadow)}</g>${gated(tube)}${head}</g>`,
+    `<g class="${snakeFade}"${glowAttr(theme)}><g ${dashing}><g opacity="${rimOpacity}">${gated(shadow)}</g>${gated(tube)}</g>${head}</g>`,
     `<g>${pops.join("")}</g>`,
     bar,
     end
