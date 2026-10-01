@@ -218,7 +218,8 @@ export function simulateSnake(grid: Grid, coda: (playSteps: number, eats: SnakeE
 const BODY = 13;
 const OUTLINE = 1.5;
 const HEAD = 16;
-const TAPER = [0.6, 0.72, 0.84, 0.93];
+/** Width of the body towards the tail, one entry per half segment so the taper has no visible steps. */
+const TAPER = [0.6, 0.64, 0.7, 0.76, 0.82, 0.88, 0.93, 0.97];
 const POP = 0.22;
 /** Share of the cells eaten before the snake speeds up. */
 const SPEED_UP_AT = 0.55;
@@ -366,16 +367,36 @@ function render(ctx: GameContext): GameOutput {
 
   const growth = sim.eats.filter((e) => e.grew);
   const growTime = (m: number) => at(growth[m - 1].step);
-  const taperShape = (j: number) => (j < TAPER.length ? TAPER[j] : 1);
+  const taperShape = (e: number) => (e < TAPER.length ? TAPER[e] : 1);
   const rim = dark ? theme.surface : theme.ink;
   const rimOpacity = dark ? 1 : 0.8;
+
+  // The body is drawn as short dashes of one stroked route through the cell centres, so it is an exact tube
+  // around the path at every instant. Pieces that were slid along the path as separate shapes cut corners
+  // differently depending on where they sat relative to the turn, and the corner pulsed as the snake moved.
+  const pitch = Math.abs(px(1)[0] - px(0)[0]);
+  const reach = Math.ceil(lastStep * pitch) + pitch;
+  const route: string[] = [];
+  for (let k = 0; k <= lastStep; k++) {
+    if (k === 0 || k === lastStep || dirs[k - 1] !== dirs[k]) {
+      const [x, y] = px(sim.path[k]);
+      route.push(`${route.length ? "L" : "M"}${fmt(x)} ${fmt(y)}`);
+    }
+  }
+  const dash = pitch / 2;
+  // A dash starts at -offset along the route; the gap is longer than the route so the pattern never repeats.
+  const along = (steps: number) => `stroke-dashoffset:${fmt(dash / 2 - steps * pitch)}px`;
 
   // Each speed gets its own copy of the body. Segment i trails the head by i steps, which is a fixed time lag
   // only while the speed is constant, so a copy is shown for exactly the stretch its lag is right for.
   const copies = phases.map((phase, j) => {
     const lo = j === 0 ? 0 : Math.max(0, phase.from - growth.length - 2);
     const hi = j + 1 < phases.length ? phases[j + 1].from : lastStep;
-    const frames = moveFrames(lo, hi, (k) => atIn(j, k)).filter(([t]) => t >= 0);
+    const tLo = atIn(j, lo);
+    const frames: Frame[] =
+      tLo >= 0
+        ? [[tLo, along(lo)], [atIn(j, hi), along(hi)]]
+        : [[0, along(lo - tLo / phase.s)], [atIn(j, hi), along(hi)]];
     return { track: tl.keyframes(frames), s: phase.s };
   });
   const gates = copies.map((_, j) => {
@@ -391,32 +412,37 @@ function render(ctx: GameContext): GameOutput {
   const tube: string[][] = copies.map(() => []);
   const shadow: string[][] = copies.map(() => []);
   for (let i = growth.length; i >= 1; i--) {
-    const frames: Frame[] = [[0, "opacity:0;transform:scale(.2)"]];
-    for (let j = 0; j <= TAPER.length; j++) {
-      const m = i + j;
-      if (m > growth.length) break;
-      const start = growTime(m);
-      const next = m + 1 <= growth.length ? growTime(m + 1) : Infinity;
-      const end = Math.min(start + POP, next);
-      const from = j === 0 ? "opacity:0;transform:scale(.2)" : `opacity:1;transform:scale(${fmt(taperShape(j - 1))})`;
-      const to = `opacity:1;transform:scale(${fmt(taperShape(j))})`;
-      frames.push([start, from], [end, to]);
-    }
-    frames.push([fadeEnd, frames[frames.length - 1][1]], [fadeEnd + 0.01, "opacity:0"]);
-    const look = tl.track(frames);
+    // Half segment `e` counts from the tail tip: a piece's own centre is even, the bridge towards the head odd.
+    const look = (size: number, odd: number) => {
+      const width = (scale: number) => `stroke-width:${fmt(size * scale)}`;
+      const frames: Frame[] = [[0, `opacity:0;${width(0.2)}`]];
+      for (let j = 0; 2 * j <= TAPER.length; j++) {
+        const m = i + j;
+        if (m > growth.length) break;
+        const start = growTime(m);
+        const next = m + 1 <= growth.length ? growTime(m + 1) : Infinity;
+        const end = Math.min(start + POP, next);
+        const from = j === 0 ? `opacity:0;${width(0.2)}` : `opacity:1;${width(taperShape(2 * j - 2 + odd))}`;
+        frames.push([start, from], [end, `opacity:1;${width(taperShape(2 * j + odd))}`]);
+      }
+      frames.push([fadeEnd, frames[frames.length - 1][1]], [fadeEnd + 0.01, "opacity:0"]);
+      return tl.track(frames);
+    };
+    const looks = [look(BODY, 0), look(BODY, 1), look(BODY + 2 * OUTLINE, 0), look(BODY + 2 * OUTLINE, 1)];
     const fill = spriteColor(theme, growth[i - 1].cell);
     const joint = i === 1 ? fill : mixColors(spriteColor(theme, growth[i - 2].cell), fill);
     copies.forEach((copy, j) => {
       const pos = tl.useKeyframes(copy.track, i * copy.s);
       const bridge = tl.useKeyframes(copy.track, (i - 0.5) * copy.s);
-      const piece = (cls: string, size: number, color: string) =>
-        `<g class="${cls}"><rect class="${look}" x="${fmt(-size / 2)}" y="${fmt(-size / 2)}" width="${size}" height="${size}" rx="${fmt(size * 0.32)}" fill="${color}"/></g>`;
-      tube[j].push(piece(pos, BODY, fill), piece(bridge, BODY, joint));
-      shadow[j].push(piece(pos, BODY + 2 * OUTLINE, rim), piece(bridge, BODY + 2 * OUTLINE, rim));
+      const piece = (look: string, cls: string, color: string) =>
+        `<g class="${look}"><use class="${cls}" href="#body-route" stroke="${color}"/></g>`;
+      tube[j].push(piece(looks[0], pos, fill), piece(looks[1], bridge, joint));
+      shadow[j].push(piece(looks[2], pos, rim), piece(looks[3], bridge, rim));
     });
   }
   const gated = (parts: string[][]) =>
     parts.map((p, j) => (gates[j] ? `<g class="${gates[j]}">${p.join("")}</g>` : p.join(""))).join("");
+  const dashing = `stroke-dasharray="${fmt(dash)} ${reach}"`;
 
   const baseCells: string[] = [];
   const foodCells: string[] = [];
@@ -471,6 +497,7 @@ function render(ctx: GameContext): GameOutput {
   const defs =
     glowDefs(theme) +
     `<g id="pop"><circle r="7" fill="none" stroke="${flash}" stroke-width="1.4"/>${spark(8, 7, 1.7)}</g>` +
+    (growth.length > 0 ? `<path id="body-route" d="${route.join("")}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>` : "") +
     `<g id="pop-big"><circle r="8" fill="none" stroke="${flash}" stroke-width="2"/><circle r="5" fill="none" stroke="${theme.accent}" stroke-width="2"/>${spark(12, 8, 2.1)}</g>`;
 
   const clears: ClearEvent[] = sim.eats.map((e) => ({ t: at(e.step), cell: e.cell }));
@@ -496,7 +523,7 @@ function render(ctx: GameContext): GameOutput {
   const bodyMarkup = [
     `<g>${baseCells.join("")}</g>`,
     `<g>${foodCells.join("")}</g>`,
-    `<g class="${snakeFade}"${glowAttr(theme)}><g opacity="${rimOpacity}">${gated(shadow)}</g>${gated(tube)}${head}</g>`,
+    `<g class="${snakeFade}"${glowAttr(theme)}><g ${dashing}><g opacity="${rimOpacity}">${gated(shadow)}</g>${gated(tube)}</g>${head}</g>`,
     `<g>${pops.join("")}</g>`,
     bar,
     end,
