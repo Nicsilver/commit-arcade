@@ -1,0 +1,26 @@
+name: Commit Arcade
+description: Classic arcade games played on your GitHub contribution graph, as animated SVGs for your profile README.
+author: Nicolaj Jensen
+branding:
+  icon: play
+  color: purple
+
+inputs:
+  github_user_name:
+    description: Whose contribution graph to play on.
+    default: ${{ github.repository_owner }}
+  github_token:
+    description: Token used to read the contribution graph.
+    default: ${{ github.token }}
+  outputs:
+    description: |
+      One file per line, with options as a query string, e.g.
+        dist/snake.svg?game=snake&theme=github-dark
+      game: snake, pacman, breakout, invaders, asteroids or daily (rotates every day)
+      theme: github-dark, github-light or neon
+      colours: background, empty, ink, muted, accent, levels (4 comma-separated)
+    required: true
+
+runs:
+  using: node24
+  main: dist/index.js
