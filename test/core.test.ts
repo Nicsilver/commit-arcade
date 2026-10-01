@@ -17,6 +17,12 @@ test("timeline keeps instant jumps as two distinct offsets", () => {
   assert.match(tl.css(), /50%\{opacity:1\}50\.0001%\{opacity:0\}/);
 });
 
+test("timeline keeps frame order when times differ only by float error", () => {
+  const tl = new Timeline(10);
+  tl.track([[0, "a:0"], [0.1 + 0.2, "a:1"], [0.3, "a:2"], [1, "a:2"]]);
+  assert.match(tl.css(), /3%\{a:1\}3\.0001%\{a:2\}/);
+});
+
 test("timeline drops redundant frames inside a constant run", () => {
   const tl = new Timeline(10);
   tl.track([[0, "a:1"], [1, "a:1"], [2, "a:1"], [3, "a:2"]]);

@@ -134,7 +134,7 @@ var Timeline = class {
   }
   body(frames) {
     if (frames.length === 0) throw new Error("A track needs at least one frame");
-    const sorted = frames.map(([t, css], i) => ({ t: Math.min(Math.max(t, 0), this.duration), css, i })).sort((a, b) => a.t - b.t || a.i - b.i);
+    const sorted = frames.map(([t, css], i) => ({ t: Math.round(Math.min(Math.max(t, 0), this.duration) * 1e5) / 1e5, css, i })).sort((a, b) => a.t - b.t || a.i - b.i);
     if (sorted[0].t > 0) sorted.unshift({ t: 0, css: sorted[0].css, i: -1 });
     const last = sorted[sorted.length - 1];
     if (last.t < this.duration) sorted.push({ t: this.duration, css: last.css, i: Infinity });

@@ -73,8 +73,11 @@ export class Timeline {
 
   private body(frames: Frame[]): string {
     if (frames.length === 0) throw new Error("A track needs at least one frame");
+    // Times are rounded before sorting: two frames meant to share an instant
+    // (one beat ending as the next begins) often differ by float error, and
+    // sorting them on that error swaps them and turns a blink into a fade.
     const sorted = frames
-      .map(([t, css], i) => ({ t: Math.min(Math.max(t, 0), this.duration), css, i }))
+      .map(([t, css], i) => ({ t: Math.round(Math.min(Math.max(t, 0), this.duration) * 1e5) / 1e5, css, i }))
       .sort((a, b) => a.t - b.t || a.i - b.i);
     if (sorted[0].t > 0) sorted.unshift({ t: 0, css: sorted[0].css, i: -1 });
     const last = sorted[sorted.length - 1];
