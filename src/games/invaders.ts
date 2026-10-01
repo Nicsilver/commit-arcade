@@ -2,7 +2,8 @@ import { Timeline, fmt, translate, type Frame } from "../anim.ts";
 import { PACE, loopDuration, restoreAt, type Game, type GameContext, type GameOutput } from "../game.ts";
 import { activeCells, allCells, type Cell, type Grid } from "../grid.ts";
 import type { Rng } from "../rng.ts";
-import { levelColor, makeLayout, type Layout } from "../svg.ts";
+import { arcadeLayout, banner, glowAttr, glowDefs, hud, spriteColor, stageClearLines, type ClearEvent } from "../kit.ts";
+import { cellRect, type Layout } from "../svg.ts";
 import type { Theme } from "../theme.ts";
 import { bitmapPath, pixelText } from "../pixel-font.ts";
 
@@ -120,6 +121,7 @@ const bombRows = (phase: number) => Array.from({ length: 7 }, (_, y) => ".".repe
 const SPRITE_SCALE = [1, 1, 12 / 11, 1.5];
 const BLAST_SCALE = 1.25;
 const CANNON_SCALE = 2;
+const UFO_SCALE = 1.5;
 const CANNON_HALF = 13;
 const SHOT_SPEED = 620;
 const BOMB_SPEED = 170;
@@ -132,6 +134,12 @@ const BUNKER_TILE = 2;
 const BUNKER_COLS = 13;
 const BUNKER_ROWS = 8;
 const UFO_AFTER = [0.15, 0.55];
+/** Below this share of invaders left the cannon speeds up and fires faster. */
+const RUSH_SHARE = 0.3;
+/** Shots that may chip one bunker; bombs do the rest of the damage. */
+const SHOT_CHIPS_PER_BUNKER = 2;
+/** Penalty for firing from under a bunker, in the same units as the planner's travel cost. */
+const BUNKER_LANE_COST = 70;
 const SHOT_H = 10;
 const SHOT_LEAD = 6;
 
@@ -148,21 +156,20 @@ interface Field {
 }
 
 function makeField(grid: Grid): Field {
-  const layout = makeLayout(grid, { left: 20, top: 26 });
+  const layout = arcadeLayout(grid);
   const bottom = layout.top + layout.gridHeight;
-  const width = layout.left + layout.gridWidth + 20;
   const bunkerWidth = BUNKER_COLS * BUNKER_TILE;
   const slot = (layout.gridWidth + 4) / 4;
   return {
     layout,
-    width,
-    height: bottom + 84,
-    ufoY: 7,
-    bunkerTop: bottom + 22,
-    cannonY: bottom + 54,
-    groundY: bottom + 74,
+    width: layout.width,
+    height: layout.height,
+    ufoY: 33,
+    bunkerTop: bottom + 12,
+    cannonY: bottom + 34,
+    groundY: bottom + 54,
     bunkerX: [0, 1, 2, 3].map((i) => Math.round(layout.left + slot * (i + 0.5) - bunkerWidth / 2 - 2)),
-    startX: Math.round(width / 2),
+    startX: Math.round(layout.width / 2),
   };
 }
 
@@ -270,7 +277,9 @@ function planShots(field: Field, grid: Grid, cells: Cell[], march: March, fireGa
   let cannonX = field.startX;
   let lastDir = 0;
   let pending = null as { fire: number; hit: number; x: number; ufo: Ufo } | null;
-  const ufoFlight = (cannonY - SHOT_LEAD - (ufoY + 7)) / SHOT_SPEED;
+  const ufoFlight = (cannonY - SHOT_LEAD - (ufoY + 7 * UFO_SCALE)) / SHOT_SPEED;
+  const lanes = field.bunkerX.map((x) => [x - 3, x + BUNKER_COLS * BUNKER_TILE + 3] as const);
+  const underBunker = (x: number) => lanes.some(([a, b]) => x > a && x < b);
 
   const tryPlanUfo = () => {
     const clear = [];
@@ -312,7 +321,7 @@ function planShots(field: Field, grid: Grid, cells: Cell[], march: March, fireGa
 
   const fireUfo = () => {
     const p = pending!;
-    plan.shots.push({ fire: p.fire, hit: p.hit, x: p.x, y: ufoY + 7, cell: null });
+    plan.shots.push({ fire: p.fire, hit: p.hit, x: p.x, y: ufoY + 7 * UFO_SCALE, cell: null });
     lastDir = Math.sign(p.x - cannonX) || lastDir;
     lastFire = p.fire;
     cannonX = p.x;
@@ -326,32 +335,35 @@ function planShots(field: Field, grid: Grid, cells: Cell[], march: March, fireGa
       continue;
     }
 
+    const rush = Math.max(0, 1 - remaining / (total * RUSH_SHARE));
+    const gap = fireGap * (1 - 0.65 * rush);
+    const speed = CANNON_SPEED * (1 + 1.6 * rush);
     let best: { col: number; fire: number; hit: number; x: number; cost: number } | null = null;
     for (let col = 0; col < cols; col++) {
       const cell = columns[col][0];
       if (!cell) continue;
       const bottom = spriteBottom(layout, cell);
       const flight = (cannonY - SHOT_LEAD - bottom) / SHOT_SPEED;
-      let fire = lastFire + fireGap;
+      let fire = lastFire + gap;
       let hit = fire + flight;
       let x = columnX(layout, col) + offsetAt(march, hit);
       for (let i = 0; i < 3; i++) {
-        fire = Math.max(lastFire + fireGap, lastFire + HOLD + Math.abs(x - cannonX) / CANNON_SPEED);
+        fire = Math.max(lastFire + gap, lastFire + HOLD + Math.abs(x - cannonX) / speed);
         hit = fire + flight;
         x = columnX(layout, col) + offsetAt(march, hit);
       }
       if (fire < lock[col]) continue;
       const dx = x - cannonX;
       const dir = Math.sign(dx);
-      const cost = Math.abs(dx) + (dir !== 0 && dir !== lastDir && Math.abs(dx) > 3 ? 22 : 0) + 2.5 * columns[col].length + rng() * 5;
+      const cost = Math.abs(dx) + (dir !== 0 && dir !== lastDir && Math.abs(dx) > 3 ? 22 : 0) + 2.5 * columns[col].length + (underBunker(x) ? BUNKER_LANE_COST : 0) + rng() * 5;
       if (!best || cost < best.cost) best = { col, fire, hit, x, cost };
     }
     if (!best) {
       // Every column still has a shot in the air; wait for the first to land.
-      lastFire += fireGap;
+      lastFire += gap;
       continue;
     }
-    if (pending && best.fire + HOLD + Math.abs(pending.x - best.x) / CANNON_SPEED > pending.fire) {
+    if (pending && best.fire + HOLD + Math.abs(pending.x - best.x) / speed > pending.fire) {
       fireUfo();
       continue;
     }
@@ -476,10 +488,12 @@ export function simulateInvaders(grid: Grid, rng: Rng): InvadersPlay {
   }
   events.sort((a, b) => a.t - b.t);
   const resolved: Bomb[] = new Array(bombs.length);
+  const shotChips = field.bunkerX.map(() => 0);
   for (const ev of events) {
     if (ev.kind === "shot") {
       const b = bunkerAt(ev.x);
-      if (b < 0) continue;
+      if (b < 0 || shotChips[b] >= SHOT_CHIPS_PER_BUNKER) continue;
+      shotChips[b]++;
       const col = Math.floor((ev.x - field.bunkerX[b]) / BUNKER_TILE);
       const removed: Chip["tiles"] = [];
       for (let row = BUNKER_ROWS - 1, taken = 0; row >= 0 && taken < 2; row--) {
@@ -551,8 +565,12 @@ function render(ctx: GameContext): GameOutput {
   const at = (t: number) => intro + t;
   const tl = new Timeline(duration, "i");
   const light = parseInt(theme.ink.slice(1, 3), 16) < 0x80;
-  const green = light ? "#1a7f37" : "#20ff20";
-  const red = light ? "#cf222e" : "#ff3b3b";
+  // Classic phosphor green on GitHub dark; the other palettes get hardware colours that fit them.
+  const green = theme.name === "github-dark" ? "#20ff20" : light ? "#1a7f37" : theme.accent;
+  const red = light ? "#cf222e" : theme.name === "github-dark" ? "#ff3b3b" : "#ff4d6d";
+  const glow = glowAttr(theme);
+  // A filter over hundreds of animated sprites renders as a black patch in Chromium, so sprites get a faint outline instead.
+  const halo = (color: string) => (theme.glow > 0 ? ` stroke="${color}" stroke-opacity=".3" stroke-width="${theme.glow > 2 ? 2.6 : 1.8}" stroke-linejoin="round"` : "");
   const ink = theme.ink;
   const delay = (t: number) => `style="--d:${(-(duration - at(t))).toFixed(3)}s"`;
   const empty = sim.kills.length === 0;
@@ -563,14 +581,11 @@ function render(ctx: GameContext): GameOutput {
     frames.forEach((rows, f) => defs.push(`<path id="${names[i]}${f}" d="${bitmapPath(rows, [SPRITE_SCALE[0], SPRITE_SCALE[2], SPRITE_SCALE[3]][i])}"/>`));
   });
   defs.push(`<path id="bl" d="${bitmapPath(BLAST, BLAST_SCALE)}"/>`, `<path id="sp" d="${bitmapPath(SPLAT)}"/>`);
-  defs.push(`<path id="uf" d="${bitmapPath(UFO)}"/>`, `<path id="cn" d="${bitmapPath(CANNON, CANNON_SCALE)}"/>`);
+  defs.push(`<path id="uf" d="${bitmapPath(UFO, UFO_SCALE)}"/>`, `<path id="cn" d="${bitmapPath(CANNON, CANNON_SCALE)}"/>`);
   for (let i = 0; i < 4; i++) defs.push(`<path id="bm${i}" d="${bitmapPath(bombRows(i))}"/>`);
 
   const parts: string[] = [];
-  for (const cell of allCells(grid).filter((c) => c.level === 0)) {
-    const [x, y] = [layout.left + cell.x * layout.pitch, layout.top + cell.y * layout.pitch];
-    parts.push(`<rect x="${x}" y="${y}" width="${layout.cell}" height="${layout.cell}" rx="${layout.radius}" fill="${theme.empty}"/>`);
-  }
+  for (const cell of allCells(grid)) parts.push(cellRect(layout, cell, theme.empty));
 
   // Formation: one stepped translate, with the leg frames flipping on the same beats.
   const marchFrames: Frame[] = [[0, "transform:translate(0px,0px)"]];
@@ -610,13 +625,13 @@ function render(ctx: GameContext): GameOutput {
       [back + PACE.restore, "opacity:1"],
     ]);
     invaders.push(
-      `<g class="${cls}" fill="${levelColor(theme, cell)}"><use class="${legAClass}" href="#${id}0" x="${fmt(x)}" y="${fmt(y)}"/><use class="${legBClass}" href="#${id}1" x="${fmt(x)}" y="${fmt(y)}"/></g>`,
+      `<g class="${cls}" fill="${spriteColor(theme, cell)}"${halo(spriteColor(theme, cell))}><use class="${legAClass}" href="#${id}0" x="${fmt(x)}" y="${fmt(y)}"/><use class="${legBClass}" href="#${id}1" x="${fmt(x)}" y="${fmt(y)}"/></g>`,
     );
     const cx = columnX(layout, cell.x) + offsetAt(sim.march, kill.t);
     blasts.push(`<use class="bx" href="#bl" x="${fmt(cx - 6.5 * BLAST_SCALE)}" y="${fmt(y + spriteHeight(cell) / 2 - 3.5 * BLAST_SCALE)}" ${delay(kill.t)}/>`);
   }
   parts.push(`<g class="${marchClass}">${invaders.join("")}</g>`);
-  parts.push(`<g fill="${ink}">${blasts.join("")}</g>`);
+  parts.push(`<g fill="${ink}"${halo(ink)}>${blasts.join("")}</g>`);
 
   // Bunkers: untouched tiles are one path, each chip event is its own group that vanishes when hit.
   const gone = new Set<string>();
@@ -626,7 +641,7 @@ function render(ctx: GameContext): GameOutput {
     const rows = BUNKER.map((row, r) => [...row].map((ch, c) => (ch === "#" && !gone.has(`${b}:${c}:${r}`) ? "#" : ".")).join(""));
     bunkerStatic.push(bitmapPath(rows, BUNKER_TILE, bx, field.bunkerTop));
   });
-  parts.push(`<path d="${bunkerStatic.join("")}" fill="${green}"/>`);
+  parts.push(`<path d="${bunkerStatic.join("")}" fill="${green}"${glow}/>`);
   for (const chip of sim.chips) {
     const d = chip.tiles
       .map(([b, c, r]) => bitmapPath(["#"], BUNKER_TILE, field.bunkerX[b] + c * BUNKER_TILE, field.bunkerTop + r * BUNKER_TILE))
@@ -688,14 +703,14 @@ function render(ctx: GameContext): GameOutput {
   // Mystery ship.
   const ufoEls: string[] = [];
   for (const u of sim.ufos) {
-    const startX = u.dir > 0 ? -16 : field.width;
-    const endX = u.dir > 0 ? field.width : -16;
+    const startX = u.dir > 0 ? -24 : field.width;
+    const endX = u.dir > 0 ? field.width : -24;
     const cross = (field.width + 16) / UFO_SPEED;
     const a = at(u.start);
     const frames: Frame[] = [[0, `opacity:0;${translate(startX, field.ufoY)}`], [a, `opacity:0;${translate(startX, field.ufoY)}`], [a, `opacity:1;${translate(startX, field.ufoY)}`]];
     if (u.hit !== null) {
       const h = at(u.hit);
-      const x = u.hitX - 8;
+      const x = u.hitX - 8 * UFO_SCALE;
       frames.push([h, `opacity:1;${translate(x, field.ufoY)}`], [h, `opacity:0;${translate(x, field.ufoY)}`]);
     } else {
       frames.push([a + cross, `opacity:1;${translate(endX, field.ufoY)}`], [a + cross, `opacity:0;${translate(endX, field.ufoY)}`]);
@@ -705,7 +720,7 @@ function render(ctx: GameContext): GameOutput {
       const h = at(u.hit);
       const label = pixelText(String(u.score), 2);
       const lx = Math.min(Math.max(u.hitX - label.width / 2, 2), field.width - label.width - 2);
-      ufoEls.push(`<use class="bx" href="#bl" x="${fmt(u.hitX - 6.5 * BLAST_SCALE)}" y="${fmt(field.ufoY + 3.5 - 3.5 * BLAST_SCALE)}" fill="${red}" ${delay(u.hit)}/>`);
+      ufoEls.push(`<use class="bx" href="#bl" x="${fmt(u.hitX - 6.5 * BLAST_SCALE)}" y="${fmt(field.ufoY + 3.5 * UFO_SCALE - 3.5 * BLAST_SCALE)}" fill="${red}" ${delay(u.hit)}/>`);
       const cls = tl.track([[0, "opacity:0"], [h + 0.2, "opacity:0"], [h + 0.2, "opacity:1"], [h + 1.2, "opacity:1"], [h + 1.2, "opacity:0"]]);
       ufoEls.push(`<path class="${cls}" d="${label.d}" transform="translate(${fmt(lx)} ${field.ufoY - 3})" fill="${red}"/>`);
     }
@@ -725,27 +740,15 @@ function render(ctx: GameContext): GameOutput {
       t += 0.3;
     }
   }
-  parts.push(`<g class="${tl.track(cannonFrames)}"><use class="${tl.track(blink)}" href="#cn" fill="${green}"/></g>`);
+  parts.push(`<g class="${tl.track(cannonFrames)}"><g${glow}><use class="${tl.track(blink)}" href="#cn" fill="${green}"/></g></g>`);
 
   if (!empty) {
-    const text = pixelText("WAVE CLEARED", 4);
-    const pad = 12;
-    const px = layout.left + layout.gridWidth / 2 - text.width / 2;
-    const py = layout.top + layout.gridHeight / 2 - text.height / 2;
-    const panel = theme.background ?? (light ? "#ffffff" : "#0d1117");
-    const flashT = at(play) + 0.1;
-    const on: Frame[] = [[0, "opacity:0"]];
-    let t = flashT;
-    for (let i = 0; i < 2; i++) {
-      on.push(...tri(t, "opacity:0", "opacity:1"), ...tri(t + 0.12, "opacity:1", "opacity:0"));
-      t += 0.22;
-    }
-    on.push(...tri(t, "opacity:0", "opacity:1"), ...tri(back - 0.05, "opacity:1", "opacity:0"));
-    parts.push(
-      `<g class="${tl.track(on)}"><rect x="${fmt(px - pad)}" y="${fmt(py - pad)}" width="${fmt(text.width + pad * 2)}" height="${fmt(text.height + pad * 2)}" rx="4" fill="${panel}" fill-opacity=".92" stroke="${green}" stroke-width="2"/>` +
-        `<path d="${text.d}" transform="translate(${fmt(px)} ${fmt(py)})" fill="${green}"/></g>`,
-    );
+    const gridCx = layout.left + layout.gridWidth / 2;
+    const gridCy = layout.top + layout.gridHeight / 2;
+    parts.push(banner(tl, { theme, lines: stageClearLines(grid), cx: gridCx, cy: gridCy, from: at(play) + 0.1, to: back - 0.05 }));
   }
+  const clears: ClearEvent[] = sim.kills.map((k) => ({ t: at(k.t), cell: k.cell }));
+  parts.push(hud(tl, grid, { theme, title: "SPACE INVADERS", clears, resetAt: back, width: field.width }));
 
   const cycle = 0.32;
   const dur = (n: number) => fmt(n);
@@ -758,7 +761,7 @@ function render(ctx: GameContext): GameOutput {
     "path{shape-rendering:crispEdges}",
     tl.css(),
   ].join("\n");
-  return { width: field.width, height: field.height, css, defs: defs.join(""), body: parts.join("\n") };
+  return { width: field.width, height: field.height, css, defs: defs.join("") + glowDefs(theme), body: parts.join("\n") };
 }
 
 export const invaders: Game = { id: "invaders", title: "Space Invaders", render };

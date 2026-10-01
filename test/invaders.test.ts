@@ -82,3 +82,18 @@ test("rendering is deterministic", () => {
   const dark = THEMES["github-dark"];
   assert.equal(renderGame(invaders, sample, dark, "seed"), renderGame(invaders, sample, dark, "seed"));
 });
+
+test("the last invaders fall quickly", () => {
+  const sim = simulateInvaders(sample, createRng("test"));
+  const times = sim.kills.map((k) => k.t);
+  const tail = times[times.length - 1] - times[Math.floor(times.length * 0.9)];
+  assert.ok(tail < 3.5, `last 10% took ${tail}s`);
+});
+
+test("every day keeps its empty tile and the hardware follows the theme", () => {
+  const neon = renderGame(invaders, sample, THEMES.neon, "seed");
+  const tiles = neon.split(`fill="${THEMES.neon.empty}"`).length - 1;
+  assert.ok(tiles >= sample.cells.flat().filter(Boolean).length);
+  assert.ok(!neon.includes("#20ff20"));
+  assert.ok(renderGame(invaders, sample, THEMES["github-dark"], "seed").includes("#20ff20"));
+});
