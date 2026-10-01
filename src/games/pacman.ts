@@ -4,8 +4,11 @@ import { PACE, loopDuration, restoreAt } from "../game.ts";
 import type { Game, GameContext, GameOutput } from "../game.ts";
 import { activeCells } from "../grid.ts";
 import type { Cell, Grid } from "../grid.ts";
+import { arcadeLayout, banner, glowAttr, glowDefs, hud, stageClearLines } from "../kit.ts";
+import type { ClearEvent } from "../kit.ts";
+import { pixelText } from "../pixel-font.ts";
 import type { Rng } from "../rng.ts";
-import { cellCenter, cellRect, levelColor, makeLayout } from "../svg.ts";
+import { cellCenter, cellRect, levelColor } from "../svg.ts";
 import type { Theme } from "../theme.ts";
 
 const LANE = 1;
@@ -21,10 +24,15 @@ const FRIGHT_PERIOD = 5;
 const EYES_PERIOD = 1;
 const FRIGHT_LENGTH = 100;
 const FLASH_LENGTH = 24;
-const SCATTER_LENGTH = 50;
-const CHASE_LENGTH = 110;
+const SCATTER_LENGTH = 30;
+const CHASE_LENGTH = 130;
 /** Ghosts never move closer than this (Manhattan) to Pac-Man; he in turn stays further than this from them. */
 const GHOST_GAP = 2;
+/** Blinky, chasing, is allowed right behind Pac-Man. */
+const PRESS_GAP = 1;
+const BLINKY_PERIOD = 2;
+/** Share of the dots left at which Pac-Man stops dawdling: he doubles his speed and heads for the nearest dot. */
+const ENDGAME_SHARE = 0.2;
 const HUNT_RANGE = 14;
 /** How far from a candidate dot Pac-Man looks for the next one when choosing where to go. */
 const LOOKAHEAD = 6;
@@ -61,7 +69,7 @@ export interface PacmanSim {
   pac: Waypoint[];
   ghosts: { waypoints: Waypoint[]; spans: GhostSpan[] }[];
   /** Cells in the order Pac-Man arrives on them; `t` is the arrival time. */
-  eats: { t: number; cell: Cell; power: boolean }[];
+  eats: { t: number; cell: Cell; power: boolean; period: number }[];
   ghostEats: { t: number; ghost: number; points: number; x: number; y: number }[];
   /** Arrival time on the last cell: the level is cleared. */
   end: number;
@@ -106,27 +114,29 @@ export function ghostModeAt(spans: GhostSpan[], t: number): GhostMode {
   return "normal";
 }
 
+/** One pellet per corner of the active area, like the arcade's four, as long as there are enough dots to spare. */
 function pickPowerPellets(food: Cell[]): Set<Cell> {
-  if (food.length === 0) return new Set();
-  const sorted = [...food].sort((a, b) => b.level - a.level || a.x - b.x || a.y - b.y);
-  const pool = sorted.slice(0, Math.max(POWER_PELLETS, sorted.filter((c) => c.level === sorted[0].level).length));
-  const width = Math.max(...food.map((c) => c.x)) + 1;
-  const first = [...pool].sort((a, b) => Math.abs(a.x - width * 0.2) - Math.abs(b.x - width * 0.2))[0];
-  const chosen = [first];
-  while (chosen.length < Math.min(POWER_PELLETS, pool.length)) {
+  const count = Math.min(POWER_PELLETS, Math.floor(food.length / 4));
+  if (count === 0) return new Set();
+  const xs = food.map((c) => c.x);
+  const ys = food.map((c) => c.y);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const corners: [number, number][] = [[x0, y1], [x1, y0], [x0, y0], [x1, y1]];
+  const chosen = new Set<Cell>();
+  for (const [cx, cy] of corners.slice(0, count)) {
     let best: Cell | null = null;
-    let bestScore = -1;
-    for (const c of pool) {
-      if (chosen.includes(c)) continue;
-      const score = Math.min(...chosen.map((o) => Math.abs(o.x - c.x) + Math.abs(o.y - c.y)));
-      if (score > bestScore) {
+    let bestDist = Infinity;
+    for (const c of food) {
+      if (chosen.has(c)) continue;
+      const d = Math.abs(c.x - cx) * 1.5 + Math.abs(c.y - cy) * 3 - c.level * 0.1;
+      if (d < bestDist) {
         best = c;
-        bestScore = score;
+        bestDist = d;
       }
     }
-    chosen.push(best!);
+    chosen.add(best!);
   }
-  return new Set(chosen);
+  return chosen;
 }
 
 export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
@@ -178,6 +188,9 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
   let lastEat = 0;
   let calmUntil = 0;
   let target = -1;
+  const endgameAt = Math.max(6, Math.ceil(foodList.length * ENDGAME_SHARE));
+  const pacPeriod = () => (food.size <= endgameAt ? 1 : PAC_PERIOD);
+  const gapFor = (index: number, u: number) => (index === 0 && chasing(u) ? PRESS_GAP : GHOST_GAP);
 
   const startMove = (a: Agent, dir: number, u: number, period: number) => {
     const last = a.wps[a.wps.length - 1];
@@ -251,8 +264,9 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
     }
     const goal = ghostTarget(index, g, u);
     const score = (o: { x: number; y: number }) => (o.x - goal[0]) ** 2 + (o.y - goal[1]) ** 2;
+    const gap = gapFor(index, u);
     const open = (o: { dir: number; x: number; y: number }) =>
-      manhattan(o.x, o.y, pac.x, pac.y) >= GHOST_GAP && !crowded(g, o.x, o.y);
+      manhattan(o.x, o.y, pac.x, pac.y) >= gap && !(o.x === pac.px && o.y === pac.py) && !crowded(g, o.x, o.y);
     let pool = options.filter((o) => o.dir !== reverse && open(o));
     if (pool.length === 0) pool = options.filter(open);
     if (pool.length === 0) {
@@ -263,26 +277,31 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
     } else {
       pool.sort((a, b) => score(a) - score(b));
     }
-    startMove(g, pool[0].dir, u, GHOST_PERIOD);
+    startMove(g, pool[0].dir, u, index === 0 ? BLINKY_PERIOD : GHOST_PERIOD);
   };
 
   const dangerous = (u: number) => {
     const blocked = new Uint8Array(total);
-    for (const g of ghosts) {
-      if (g.mode !== "normal") continue;
-      for (let dy = -GHOST_GAP + 1; dy <= GHOST_GAP - 1; dy++) {
-        for (let dx = -GHOST_GAP + 1; dx <= GHOST_GAP - 1; dx++) {
-          if (Math.abs(dx) + Math.abs(dy) > GHOST_GAP - 1) continue;
-          const x = g.x + dx;
-          const y = g.y + dy;
-          if (inside(x, y)) blocked[y * cols + x] = 1;
+    ghosts.forEach((g, i) => {
+      if (g.mode !== "normal") return;
+      const reach = gapFor(i, u) - 1;
+      // A ghost pressing right behind him still occupies the cell it is leaving.
+      const centres = reach === 0 ? [[g.x, g.y], [g.px, g.py]] : [[g.x, g.y]];
+      for (const [cx, cy] of centres) {
+        for (let dy = -reach; dy <= reach; dy++) {
+          for (let dx = -reach; dx <= reach; dx++) {
+            if (Math.abs(dx) + Math.abs(dy) > reach) continue;
+            const x = cx + dx;
+            const y = cy + dy;
+            if (inside(x, y)) blocked[y * cols + x] = 1;
+          }
         }
       }
-    }
+    });
     return blocked;
   };
 
-  const search = (blocked: Uint8Array, avoidPellets: boolean) => {
+  const search = (blocked: Uint8Array) => {
     const dist = new Int32Array(total).fill(-1);
     const parent = new Int32Array(total).fill(-1);
     const heading = new Int8Array(total).fill(-1);
@@ -301,8 +320,6 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
         if (!inside(x, y)) continue;
         const n = y * cols + x;
         if (dist[n] >= 0 || blocked[n]) continue;
-        const cell = food.get(n);
-        if (avoidPellets && cell && powerCells.has(cell)) continue;
         dist[n] = dist[cur] + 1;
         parent[n] = cur;
         heading[n] = d;
@@ -327,21 +344,20 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
     const chasers = normals.filter((g) => u >= g.release + 6);
     const nearestThreat = chasers.length ? Math.min(...chasers.map((g) => manhattan(g.x, g.y, pac.x, pac.y))) : Infinity;
     const frightened = u < frightEnd ? ghosts.filter((g) => g.mode === "fright") : [];
-    const nonPellets = [...food.values()].filter((c) => !powerCells.has(c)).length;
-    const plain = search(blocked, nonPellets > 0);
+    const endgame = food.size <= endgameAt;
 
     const hunted = frightened
       .map((g) => ({ g, d: manhattan(g.x, g.y, pac.x, pac.y) }))
-      .filter(({ d }) => d <= HUNT_RANGE && d * PAC_PERIOD + 4 < frightEnd - u)
+      .filter(({ d }) => !endgame && d <= HUNT_RANGE && d * pacPeriod() + 4 < frightEnd - u)
       .sort((a, b) => a.d - b.d)[0];
     if (hunted) {
       const goal = hunted.g.y * cols + hunted.g.x;
-      const route = search(blocked, true);
+      const route = search(blocked);
       if (route.dist[goal] > 0) return firstStep(route.parent, goal);
     }
 
     if (u >= frightEnd && nearestThreat <= 5 && chasing(u)) {
-      const open = search(blocked, false);
+      const open = search(blocked);
       let bestPellet = -1;
       for (const [id, c] of food) {
         if (!powerCells.has(c) || open.dist[id] < 0 || open.dist[id] > 12) continue;
@@ -353,15 +369,14 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
       }
     }
 
-    const map = nonPellets > 0 ? plain : search(blocked, false);
-    if (target >= 0 && food.has(target) && map.dist[target] > 0 && (nonPellets === 0 || !powerCells.has(food.get(target)!))) {
+    const map = search(blocked);
+    if (target >= 0 && food.has(target) && map.dist[target] > 0) {
       return firstStep(map.parent, target);
     }
     let best = -1;
     let bestCost = Infinity;
-    for (const [id, c] of food) {
+    for (const id of food.keys()) {
       if (map.dist[id] < 1) continue;
-      if (nonPellets > 0 && powerCells.has(c)) continue;
       const x = id % cols;
       const y = Math.floor(id / cols);
       let near = LOOKAHEAD;
@@ -372,7 +387,7 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
           if (food.has((y + dy) * cols + x + dx)) near = d;
         }
       }
-      const cost = map.dist[id] + 0.45 * near;
+      const cost = map.dist[id] + (endgame ? 0 : 0.45 * near);
       if (cost < bestCost) {
         bestCost = cost;
         best = id;
@@ -431,25 +446,26 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
     let pacMoved = false;
     if (u >= pac.nextAt) {
       const dir = decidePac(u);
-      startMove(pac, dir, u, PAC_PERIOD);
+      const period = pacPeriod();
+      startMove(pac, dir, u, period);
       pacMoved = true;
       const id = pac.y * cols + pac.x;
       const cell = food.get(id);
       if (cell) {
         food.delete(id);
         const power = powerCells.has(cell);
-        eats.push({ t: u + PAC_PERIOD, cell, power });
+        eats.push({ t: u + period, cell, power, period });
         lastEat = u;
         if (power) {
           chain = 0;
-          frightEnd = u + PAC_PERIOD + FRIGHT_LENGTH;
+          frightEnd = u + period + FRIGHT_LENGTH;
           for (const g of ghosts) {
             if (g.mode === "eyes") continue;
-            setMode(g, "fright", u + PAC_PERIOD);
+            setMode(g, "fright", u + period);
             g.dir = (g.dir + 2) % 4;
           }
         }
-        if (food.size === 0) end = u + PAC_PERIOD;
+        if (food.size === 0) end = u + period;
       }
     }
 
@@ -486,52 +502,6 @@ export function simulatePacman(grid: Grid, rng: Rng): PacmanSim {
     ghostEats,
     end,
   };
-}
-
-const GLYPHS: Record<string, string[]> = {
-  "0": ["111", "101", "101", "101", "111"],
-  "1": ["010", "110", "010", "010", "111"],
-  "2": ["111", "001", "111", "100", "111"],
-  "3": ["111", "001", "111", "001", "111"],
-  "4": ["101", "101", "111", "001", "001"],
-  "5": ["111", "100", "111", "001", "111"],
-  "6": ["111", "100", "111", "101", "111"],
-  "7": ["111", "001", "001", "001", "001"],
-  "8": ["111", "101", "111", "101", "111"],
-  "9": ["111", "101", "111", "001", "111"],
-  S: ["111", "100", "111", "001", "111"],
-  C: ["111", "100", "100", "100", "111"],
-  O: ["111", "101", "101", "101", "111"],
-  R: ["110", "101", "110", "101", "101"],
-  E: ["111", "100", "111", "100", "111"],
-  A: ["010", "101", "111", "101", "101"],
-  D: ["110", "101", "101", "101", "110"],
-  Y: ["101", "101", "010", "010", "010"],
-  "!": ["1", "1", "1", "0", "1"],
-};
-
-function pixelWidth(text: string, s: number): number {
-  return [...text].reduce((w, ch) => w + (GLYPHS[ch][0].length + 1) * s, -s);
-}
-
-/** Path data for pixel-font text with its top-left at (x, y). */
-function pixelText(text: string, x: number, y: number, s: number): string {
-  let d = "";
-  let cx = x;
-  for (const ch of text) {
-    const glyph = GLYPHS[ch];
-    glyph.forEach((row, ry) => {
-      for (let rx = 0; rx < row.length; rx++) {
-        if (row[rx] !== "1") continue;
-        let end = rx;
-        while (end < row.length && row[end] === "1") end++;
-        d += `M${fmt(cx + rx * s)} ${fmt(y + ry * s)}h${fmt((end - rx) * s)}v${fmt(s)}h${fmt(-(end - rx) * s)}z`;
-        rx = end;
-      }
-    });
-    cx += (glyph[0].length + 1) * s;
-  }
-  return d;
 }
 
 function isDark(theme: Theme): boolean {
@@ -617,15 +587,23 @@ const LOOK = [
   [0, -1.4],
 ];
 
+function mixColors(a: string, b: string, k: number): string {
+  const parse = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const pa = parse(a);
+  const pb = parse(b);
+  return `#${pa.map((v, i) => Math.round(v + (pb[i] - v) * k).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Sprites are drawn a little bigger than a cell so they carry across the whole strip. */
+const SPRITE = 1.28;
+const MAZE_FLASH_BEATS = 4;
+const MAZE_FLASH_BEAT = 0.25;
+
 function render(ctx: GameContext): GameOutput {
   const { grid, theme } = ctx;
   const dark = isDark(theme);
-  const margin = 22;
-  const layout = makeLayout(grid, { left: margin, top: margin });
-  const laneBottom = layout.top + (grid.height + LANE) * layout.pitch + layout.cell;
-  const hudY = laneBottom + 8;
-  const width = layout.left * 2 + layout.gridWidth;
-  const height = hudY + 10 + 7;
+  const layout = arcadeLayout(grid);
+  const { width, height } = layout;
 
   const sim = simulatePacman(grid, ctx.rng);
   const foodCount = activeCells(grid).length;
@@ -636,7 +614,6 @@ function render(ctx: GameContext): GameOutput {
   const duration = loopDuration(play);
   const restore = restoreAt(play);
   const fadeEnd = restore + PACE.restore;
-  const cellTime = unit * PAC_PERIOD;
   const tl = new Timeline(duration);
   const at = (t: number) => PACE.intro + t * unit;
   const tEnd = at(sim.end);
@@ -658,24 +635,41 @@ function render(ctx: GameContext): GameOutput {
     return frames;
   };
 
-  // Cells: empty floor underneath (it flashes on level clear), contribution cells above.
-  const flashA = "#2121ff";
-  const flashB = dark ? "#ffffff" : "#bcd0ff";
-  const flashStart = tEnd + 0.1;
-  const flashFrames: Frame[] = [[0, `fill:${theme.empty}`]];
+  // The arcade flashes the maze walls, not the floor: a rounded outline round the graph blinks while the
+  // floor only breathes, so the clear is never a full-board strobe.
+  const flashStart = tEnd + 0.05;
+  const flashEnd = flashStart + MAZE_FLASH_BEATS * MAZE_FLASH_BEAT;
+  const wallA = FRIGHT_BLUE;
+  const wallB = dark ? "#ffffff" : "#8fa6ff";
+  const wallFrames: Frame[] = [[0, "opacity:0"]];
   if (hasPlay) {
-    flashFrames.push([flashStart - 0.001, `fill:${theme.empty}`]);
-    for (let k = 0; k < 6; k++) {
-      const t = flashStart + k * 0.17;
-      flashFrames.push([t, `fill:${k % 2 === 0 ? flashA : flashB}`], [t + 0.17, `fill:${k % 2 === 0 ? flashA : flashB}`]);
+    wallFrames.push([flashStart, "opacity:0"]);
+    for (let k = 0; k < MAZE_FLASH_BEATS; k++) {
+      const t = flashStart + k * MAZE_FLASH_BEAT;
+      const css = `opacity:1;stroke:${k % 2 === 0 ? wallA : wallB}`;
+      wallFrames.push([t, css], [t + MAZE_FLASH_BEAT, css]);
     }
-    flashFrames.push([flashStart + 6 * 0.17, `fill:${theme.empty}`]);
+    wallFrames.push([flashEnd, "opacity:0"]);
   }
-  const floorClass = tl.track(flashFrames);
+  const wallClass = tl.track(wallFrames);
+  const pulse = mixColors(theme.empty, FRIGHT_BLUE, dark ? 0.2 : 0.12);
+  const floorFrames: Frame[] = [[0, `fill:${theme.empty}`]];
+  if (hasPlay) {
+    floorFrames.push(
+      [flashStart, `fill:${theme.empty}`],
+      [flashStart + 0.25, `fill:${pulse}`],
+      [flashStart + 0.5, `fill:${theme.empty}`],
+      [flashStart + 0.75, `fill:${pulse}`],
+      [flashEnd, `fill:${theme.empty}`],
+    );
+  }
+  const floorClass = tl.track(floorFrames);
+  const wall = `<rect class="${wallClass}" x="${fmt(layout.left - 7)}" y="${fmt(layout.top - 7)}" width="${fmt(layout.gridWidth + 14)}" height="${fmt(layout.gridHeight + 14)}" rx="10" fill="none" stroke="${wallA}" stroke-width="2.5"${glowAttr(theme)}/>`;
+
   const floor: string[] = [];
   const dots: string[] = [];
-  const eatTime = new Map<Cell, { t: number; power: boolean }>();
-  for (const e of sim.eats) eatTime.set(e.cell, { t: at(e.t), power: e.power });
+  const eatTime = new Map<Cell, { t: number; power: boolean; period: number }>();
+  for (const e of sim.eats) eatTime.set(e.cell, { t: at(e.t), power: e.power, period: e.period });
   for (const column of grid.cells) {
     for (const cell of column) {
       if (!cell) continue;
@@ -688,8 +682,8 @@ function render(ctx: GameContext): GameOutput {
         eaten
           ? [
               [0, rest],
-              [eaten.t - 0.5 * cellTime, rest],
-              [eaten.t + 0.1 * cellTime, "opacity:0;transform:scale(0)"],
+              [eaten.t - 0.5 * eaten.period * unit, rest],
+              [eaten.t + 0.1 * eaten.period * unit, "opacity:0;transform:scale(0)"],
               [restore, "opacity:0;transform:scale(0)"],
               [restore + PACE.restore, rest],
             ]
@@ -698,7 +692,7 @@ function render(ctx: GameContext): GameOutput {
       if (eaten?.power) {
         const [ox, oy] = [layout.left + cell.x * layout.pitch, layout.top + cell.y * layout.pitch];
         dots.push(
-          `<g class="c ${cls}">${cellRect(layout, cell, fill)}<rect x="${fmt(ox - 1.5)}" y="${fmt(oy - 1.5)}" width="${layout.cell + 3}" height="${layout.cell + 3}" rx="${layout.radius + 1}" fill="none" stroke="${theme.ink}" stroke-width="1.2"><animate attributeName="opacity" values="1;.15;1" dur=".56s" repeatCount="indefinite"/></rect></g>`,
+          `<g class="c ${cls}">${cellRect(layout, cell, fill)}<rect x="${fmt(ox - 1.5)}" y="${fmt(oy - 1.5)}" width="${layout.cell + 3}" height="${layout.cell + 3}" rx="${layout.radius + 1}" fill="none" stroke="${theme.accent}" stroke-width="1.6"><animate attributeName="opacity" values="1;.2;1" dur=".56s" repeatCount="indefinite"/></rect></g>`,
         );
       } else {
         dots.push(cellRect(layout, cell, fill, `class="c ${cls}"`));
@@ -714,19 +708,20 @@ function render(ctx: GameContext): GameOutput {
   for (let i = 1; i < pacHeadings.length; i++) {
     const turn = (pacHeadings[i][1] - pacHeadings[i - 1][1] + 4) % 4;
     const t = at(pacHeadings[i][0]);
-    rotFrames.push([t - 0.3 * cellTime, `transform:rotate(${angle}deg)`]);
+    rotFrames.push([t - 0.3 * unit, `transform:rotate(${angle}deg)`]);
     angle += turn === 1 ? 90 : turn === 3 ? -90 : 180;
-    rotFrames.push([t + 0.3 * cellTime, `transform:rotate(${angle}deg)`]);
+    rotFrames.push([t + 0.3 * unit, `transform:rotate(${angle}deg)`]);
   }
   const pacJump = Math.max(fadeEnd + 0.05, at(sim.pac[sim.pac.length - 1].t) + 0.02);
   rotFrames.push([pacJump, `transform:rotate(${angle}deg)`], [pacJump, `transform:rotate(${startAngle}deg)`]);
-  const pacFade = tl.track(fadeFrames(restore, PACE.restore));
+  const pacFade = tl.track(fadeFrames(restore - 0.4, 0.3));
   const pacPos = tl.track(moveFrames(sim.pac, pacJump));
   const pacRot = tl.track(rotFrames);
   const open = pacPath(38);
-  const pac = `<g class="${pacFade}"><g class="${pacPos}"><g class="${pacRot}"><path d="${open}" fill="${PAC_YELLOW}"${outline.replace(".8", ".9")}><animate attributeName="d" values="${open};${pacPath(3)};${open}" dur=".3s" repeatCount="indefinite"/></path></g></g></g>`;
+  const pac = `<g class="${pacFade}"${glowAttr(theme)}><g class="${pacPos}"><g class="${pacRot}"><g transform="scale(${SPRITE})"><path d="${open}" fill="${PAC_YELLOW}"${outline.replace(".8", ".9")}><animate attributeName="d" values="${open};${pacPath(3)};${open}" dur=".3s" repeatCount="indefinite"/></path></g></g></g></g>`;
 
   // Ghosts
+  const frightRim = dark ? ` stroke="#dfe6ff" stroke-width="1"` : "";
   const ghostMarkup: string[] = [];
   sim.ghosts.forEach((ghost, i) => {
     const spec = GHOSTS[i];
@@ -767,12 +762,12 @@ function render(ctx: GameContext): GameOutput {
     const lookClass = tl.track(lookFrames);
 
     ghostMarkup.push(
-      `<g class="${fade}"><g class="${pos}"${outline}>` +
+      `<g class="${fade}"${glowAttr(theme)}><g class="${pos}"><g transform="scale(${SPRITE})"${outline}>` +
         `<g class="${normalOp}"><use href="#gb" fill="${spec.color}"/></g>` +
-        `<g class="${frightOp}"><use href="#gb" fill="${FRIGHT_BLUE}"/><use href="#gf" color="#ffb8ae"/></g>` +
+        `<g class="${frightOp}"><use href="#gb" fill="${FRIGHT_BLUE}"${frightRim}/><use href="#gf" color="#ffb8ae"/></g>` +
         `<g class="${flashOp}"><use href="#gb" fill="#fff"/><use href="#gf" color="#f00"/></g>` +
         `<g class="${eyesOp}"><use href="#ge"/><g class="${lookClass}"><circle cx="-2.6" cy="-1.8" r="1.25" fill="${FRIGHT_BLUE}"/><circle cx="2.6" cy="-1.8" r="1.25" fill="${FRIGHT_BLUE}"/></g></g>` +
-        `</g></g>`,
+        `</g></g></g>`,
     );
   });
 
@@ -780,7 +775,7 @@ function render(ctx: GameContext): GameOutput {
   const popups = sim.ghostEats.map((e) => {
     const te = at(e.t);
     const [x, y] = px(e.x, e.y);
-    const text = String(e.points);
+    const text = pixelText(String(e.points), 1.6);
     const cls = tl.track([
       [0, `opacity:0;${translate(x, y)}`],
       [te - 0.001, `opacity:0;${translate(x, y)}`],
@@ -788,46 +783,13 @@ function render(ctx: GameContext): GameOutput {
       [te + 0.9, `opacity:1;${translate(x, y - 6)}`],
       [te + 0.92, `opacity:0;${translate(x, y - 6)}`],
     ]);
-    return `<path class="${cls}" d="${pixelText(text, -pixelWidth(text, 1.4) / 2, -3.5, 1.4)}" fill="${popupColor}"/>`;
+    return `<g class="${cls}"><path d="${text.d}" transform="translate(${fmt(-text.width / 2)} ${fmt(-text.height / 2)})" fill="${popupColor}"/></g>`;
   });
 
-  // Score readout
-  const events: [number, number][] = [[0, 0]];
-  let score = 0;
-  const scoring = [
-    ...sim.eats.map((e) => ({ t: e.t, points: e.power ? 50 : 10 })),
-    ...sim.ghostEats.map((e) => ({ t: e.t, points: e.points })),
-  ].sort((a, b) => a.t - b.t);
-  for (const s of scoring) {
-    score += s.points;
-    events.push([at(s.t), score]);
-  }
-  events.push([restore + 0.1, 0]);
-  const digits = Math.max(4, String(score).length);
-  const glyph = 2;
-  const advance = (3 + 1) * glyph;
-  const label = "SCORE";
-  const digitsX = 6 + pixelWidth(label, glyph) + 2 * glyph + glyph;
-  const digitIntervals = new Map<string, Interval[]>();
-  for (let k = 0; k < events.length; k++) {
-    const from = events[k][0];
-    const to = k + 1 < events.length ? events[k + 1][0] : duration;
-    String(events[k][1]).padStart(digits, "0").split("").forEach((d, p) => {
-      const key = `${p}:${d}`;
-      const list = digitIntervals.get(key) ?? [];
-      const last = list[list.length - 1];
-      if (last && last[1] >= from - 1e-6) last[1] = to;
-      else list.push([from, to]);
-      digitIntervals.set(key, list);
-    });
-  }
-  const scoreMarkup: string[] = [`<path d="${pixelText(label, 6, hudY, glyph)}" fill="${theme.muted}"/>`];
-  for (const [key, intervals] of digitIntervals) {
-    const [p, d] = key.split(":");
-    const cls = tl.track(toggleFrames(intervals, duration));
-    scoreMarkup.push(`<path class="${cls}" d="${pixelText(d, digitsX + Number(p) * advance, hudY, glyph)}" fill="${theme.ink}"/>`);
-  }
-  const readyText = "READY!";
+  const clears: ClearEvent[] = sim.eats.map((e) => ({ t: at(e.t), cell: e.cell }));
+  const bar = hud(tl, grid, { theme, title: "PAC-MAN", clears, resetAt: restore, width });
+
+  const ready = pixelText("READY!", 3);
   const readyClass = tl.track([
     [0, "opacity:1"],
     [PACE.intro - 0.05, "opacity:1"],
@@ -835,12 +797,26 @@ function render(ctx: GameContext): GameOutput {
     [duration - 0.3, "opacity:0"],
     [duration, "opacity:1"],
   ]);
-  const readyColor = dark ? PAC_YELLOW : "#c99a00";
-  scoreMarkup.push(
-    `<path class="${readyClass}" d="${pixelText(readyText, (width - pixelWidth(readyText, glyph)) / 2, hudY, glyph)}" fill="${readyColor}"/>`,
-  );
+  const readyColor = dark ? PAC_YELLOW : "#b88a00";
+  const readyX = (width - ready.width) / 2;
+  const readyY = layout.top + (layout.gridHeight - ready.height) / 2;
+  const readyMarkup =
+    `<g class="${readyClass}"><rect x="${fmt(readyX - 10)}" y="${fmt(readyY - 8)}" width="${fmt(ready.width + 20)}" height="${fmt(ready.height + 16)}" rx="6" fill="${theme.surface}" fill-opacity=".9"/>` +
+    `<path d="${ready.d}" transform="translate(${fmt(readyX)} ${fmt(readyY)})" fill="${readyColor}"/></g>`;
+
+  const end = hasPlay
+    ? banner(tl, {
+        theme,
+        lines: stageClearLines(grid),
+        cx: width / 2,
+        cy: layout.top + layout.gridHeight / 2,
+        from: tEnd + 0.45,
+        to: restore,
+      })
+    : "";
 
   const defs = [
+    glowDefs(theme),
     `<path id="gb" d="${ghostPath(SKIRT_A)}"><animate attributeName="d" values="${ghostPath(SKIRT_A)};${ghostPath(SKIRT_B)}" calcMode="discrete" dur=".34s" repeatCount="indefinite"/></path>`,
     `<g id="gf"><circle cx="-2.4" cy="-2.2" r="1.15" fill="currentColor"/><circle cx="2.4" cy="-2.2" r="1.15" fill="currentColor"/><path d="M-4.7 3.4l1.57-1.6 1.57 1.6 1.56-1.6 1.57 1.6 1.57-1.6 1.56 1.6" fill="none" stroke="currentColor" stroke-width=".9"/></g>`,
     `<g id="ge"><ellipse cx="-2.6" cy="-1.8" rx="2.1" ry="2.7" fill="#fff"/><ellipse cx="2.6" cy="-1.8" rx="2.1" ry="2.7" fill="#fff"/></g>`,
@@ -849,11 +825,14 @@ function render(ctx: GameContext): GameOutput {
   const css = `.c{transform-box:fill-box;transform-origin:center}\n${tl.css()}`;
   const body = [
     `<g class="${floorClass}">${floor.join("")}</g>`,
+    wall,
     `<g>${dots.join("")}</g>`,
     ...ghostMarkup,
     pac,
     ...popups,
-    ...scoreMarkup,
+    bar,
+    readyMarkup,
+    end,
   ].join("\n");
   return { width, height, css, defs, body };
 }

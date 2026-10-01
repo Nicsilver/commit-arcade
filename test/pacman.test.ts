@@ -46,11 +46,24 @@ test("Pac-Man eats every active cell exactly once", () => {
   }
 });
 
-test("power pellets are the highest-level cells and at most four", () => {
+test("power pellets sit in the corners of the active area and are not saved for last", () => {
   const sim = simulatePacman(grids.sample, createRng("t"));
   const pellets = sim.eats.filter((e) => e.power);
-  assert.ok(pellets.length > 0 && pellets.length <= 4);
-  assert.ok(pellets.every((e) => e.cell.level === 4));
+  assert.equal(pellets.length, 4);
+  const xs = activeCells(grids.sample).map((c) => c.x);
+  const mid = (Math.min(...xs) + Math.max(...xs)) / 2;
+  assert.equal(pellets.filter((e) => e.cell.x < mid).length, 2);
+  const lastDot = sim.eats[sim.eats.length - 1];
+  assert.ok(!lastDot.power);
+  assert.ok(pellets[2].t < sim.end * 0.9);
+});
+
+test("Pac-Man clears the last tenth of the dots quickly", () => {
+  for (const name of ["sample", "dense"]) {
+    const sim = simulatePacman(grids[name], createRng("t"));
+    const tenth = sim.eats[Math.floor(sim.eats.length * 0.9)];
+    assert.ok(sim.end - tenth.t < sim.end * 0.15, `${name}: ${sim.end - tenth.t} of ${sim.end}`);
+  }
 });
 
 test("ghosts never touch Pac-Man while they are dangerous", () => {
@@ -88,6 +101,12 @@ test("Pac-Man play length stays inside the pacing targets", () => {
     const loop = Number(/animation:k\d+ ([\d.]+)s/.exec(svg)?.[1]);
     assert.ok(loop > 20 && loop < 95, `${name}: loop ${loop}s`);
   }
+});
+
+test("Pac-Man uses the standard canvas and HUD", () => {
+  const svg = render(grids.sample);
+  assert.match(svg, /viewBox="0 0 896 216"/);
+  assert.ok(svg.includes('class="hud"'));
 });
 
 test("Pac-Man renders in every theme", () => {
