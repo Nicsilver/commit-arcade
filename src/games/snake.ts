@@ -4,7 +4,9 @@ import { PACE, loopDuration, restoreAt } from "../game.ts";
 import type { Game, GameContext, GameOutput } from "../game.ts";
 import { activeCells } from "../grid.ts";
 import type { Cell, Grid } from "../grid.ts";
-import { cellCenter, cellRect, levelColor, makeLayout } from "../svg.ts";
+import { arcadeLayout, banner, glowAttr, glowDefs, hud, spriteColor, stageClearLines } from "../kit.ts";
+import type { ClearEvent } from "../kit.ts";
+import { cellCenter, cellRect, levelColor } from "../svg.ts";
 import type { Theme } from "../theme.ts";
 
 const DX = [1, 0, -1, 0];
@@ -44,7 +46,7 @@ class Trapped extends Error {}
  * steps to keep moving once the last cell is gone, so the body never has to
  * pile up behind a head that has stopped.
  */
-export function simulateSnake(grid: Grid, coda: (playSteps: number) => number = () => 0): SnakeSim {
+export function simulateSnake(grid: Grid, coda: (playSteps: number, eats: SnakeEat[]) => number = () => 0): SnakeSim {
   const cols = grid.width + 2 * LANE;
   const rows = grid.height + 2 * LANE;
   const total = cols * rows;
@@ -208,26 +210,50 @@ export function simulateSnake(grid: Grid, coda: (playSteps: number) => number = 
     chaseTail();
   }
 
-  const extra = eats.length > 0 ? coda(playSteps) : 0;
+  const extra = eats.length > 0 ? coda(playSteps, eats) : 0;
   for (let i = 0; i < extra; i++) chaseTail();
   return { cols, rows, path, eats, playSteps, maxLength };
 }
 
-const BODY = 11;
-const OUTLINE = 1.2;
-const HEAD = 13;
+const BODY = 13;
+const OUTLINE = 1.5;
+const HEAD = 16;
 const TAPER = [0.6, 0.72, 0.84, 0.93];
 const POP = 0.22;
+/** Share of the cells eaten before the snake speeds up. */
+const SPEED_UP_AT = 0.55;
+const SPEED_UP_RATIO = 0.55;
+const MIN_STEP = 0.04;
+/** Shortest game that still gets a second gear; below this the first one is already brisk. */
+const MIN_PLAY_FOR_SPEED_UP = 10;
+const EAT_HOLD = 0.15;
+const EAT_FADE = 0.3;
+
+interface Phase {
+  /** Path step on which this speed starts. */
+  from: number;
+  /** Seconds per step. */
+  s: number;
+}
 
 function snakeAngle(dir: number): number {
   return dir * 90;
 }
 
-function stepSeconds(foodCount: number, steps: number): number {
+/** Even hundredths so the half-step lag of the joints is still a whole hundredth. */
+function roundStep(s: number): number {
+  return Math.round(s * 50) / 50;
+}
+
+function planPhases(foodCount: number, sim: Pick<SnakeSim, "playSteps" | "eats">): Phase[] {
+  const steps = sim.playSteps;
   const target = 20 + foodCount * 0.12;
   const raw = steps > 0 ? target / steps : 0.1;
-  // Even hundredths so the half-step lag of the joints is still a whole hundredth.
-  return Math.round(Math.min(0.14, Math.max(0.06, raw)) * 50) / 50;
+  const s = Math.min(0.14, Math.max(0.06, roundStep(raw)));
+  const boundary = sim.eats[Math.floor(sim.eats.length * SPEED_UP_AT)]?.step ?? steps;
+  if (sim.eats.length < 8 || boundary >= steps || boundary * s < MIN_PLAY_FOR_SPEED_UP) return [{ from: 0, s }];
+  const fast = Math.max(MIN_STEP, roundStep(s * SPEED_UP_RATIO));
+  return fast >= s ? [{ from: 0, s }] : [{ from: 0, s }, { from: boundary, s: fast }];
 }
 
 function isDark(theme: Theme): boolean {
@@ -245,29 +271,39 @@ function mixColors(a: string, b: string): string {
 
 function render(ctx: GameContext): GameOutput {
   const { grid, theme } = ctx;
-  const margin = 22;
-  const layout = makeLayout(grid, { left: margin, top: margin });
-  const width = layout.left * 2 + layout.gridWidth;
-  const height = layout.top * 2 + layout.gridHeight;
+  const layout = arcadeLayout(grid);
+  const { width, height } = layout;
+  const dark = isDark(theme);
 
-  let s = 0.1;
-  const sim = simulateSnake(grid, (playSteps) => {
-    s = stepSeconds(activeCells(grid).length, playSteps);
-    return Math.ceil((PACE.hold + PACE.restore) / s) + 2;
+  let phases: Phase[] = [{ from: 0, s: 0.1 }];
+  const sim = simulateSnake(grid, (playSteps, eats) => {
+    phases = planPhases(activeCells(grid).length, { playSteps, eats });
+    return Math.ceil((PACE.hold + PACE.restore) / phases[phases.length - 1].s);
   });
   const hasPlay = sim.eats.length > 0;
-  const play = hasPlay ? Math.round(sim.playSteps * s * 100) / 100 : 3;
+  const lastStep = sim.path.length - 1;
+
+  const starts: number[] = [PACE.intro];
+  for (let j = 1; j < phases.length; j++) {
+    starts[j] = starts[j - 1] + (phases[j].from - phases[j - 1].from) * phases[j - 1].s;
+  }
+  const atIn = (j: number, step: number) => starts[j] + (step - phases[j].from) * phases[j].s;
+  const phaseOf = (step: number) => {
+    let j = 0;
+    while (j + 1 < phases.length && phases[j + 1].from <= step) j++;
+    return j;
+  };
+  const at = (step: number) => atIn(phaseOf(step), step);
+
+  const play = hasPlay ? Math.round((at(sim.playSteps) - PACE.intro) * 100) / 100 : 3;
   const duration = loopDuration(play);
   const tl = new Timeline(duration);
   const restore = restoreAt(play);
   const fadeEnd = restore + PACE.restore;
-  const jump = fadeEnd + 0.1;
-  const at = (step: number) => PACE.intro + step * s;
+  const jumpAt = Math.max(fadeEnd + 0.05, at(lastStep) + 0.02);
 
-  const px = (id: number): [number, number] => {
-    const [x, y] = cellCenter(layout, (id % sim.cols) - LANE, Math.floor(id / sim.cols) - LANE);
-    return [x, y];
-  };
+  const px = (id: number): [number, number] =>
+    cellCenter(layout, (id % sim.cols) - LANE, Math.floor(id / sim.cols) - LANE);
   const dirs: number[] = [];
   for (let k = 1; k < sim.path.length; k++) {
     const a = sim.path[k - 1];
@@ -277,55 +313,83 @@ function render(ctx: GameContext): GameOutput {
     dirs.push(dx === 1 ? 0 : dy === 1 ? 1 : dx === -1 ? 2 : 3);
   }
 
-  const startPos = px(sim.path[0]);
-  const headFrames: Frame[] = [[PACE.intro, translate(...startPos)]];
-  const turnFrames: Frame[] = [];
-  let angle = snakeAngle(dirs[0] ?? 0);
-  const startAngle = angle;
-  turnFrames.push([PACE.intro, `transform:rotate(${angle}deg)`]);
-  for (let k = 1; k < sim.path.length; k++) {
-    const last = k === sim.path.length - 1;
-    const turn = last ? 0 : (dirs[k] - dirs[k - 1] + 4) % 4;
-    if (last || turn !== 0) headFrames.push([at(k), translate(...px(sim.path[k]))]);
-    if (turn !== 0) {
-      turnFrames.push([at(k) - 0.3 * s, `transform:rotate(${angle}deg)`]);
-      angle += turn === 1 ? 90 : -90;
-      turnFrames.push([at(k) + 0.3 * s, `transform:rotate(${angle}deg)`]);
+  const moveFrames = (lo: number, hi: number, timeOf: (step: number) => number, stops: number[] = []): Frame[] => {
+    const frames: Frame[] = [];
+    for (let k = lo; k <= hi; k++) {
+      if (k === lo || k === hi || dirs[k - 1] !== dirs[k] || stops.includes(k)) {
+        frames.push([timeOf(k), translate(...px(sim.path[k]))]);
+      }
     }
-  }
-  const endPos = px(sim.path[sim.path.length - 1]);
-  const jumpAt = Math.max(jump, at(sim.path.length - 1) + 0.02);
+    return frames;
+  };
+
+  const startPos = px(sim.path[0]);
+  const endPos = px(sim.path[lastStep]);
+  const headFrames = moveFrames(0, lastStep, at, phases.slice(1).map((p) => p.from));
   headFrames.push([jumpAt, translate(...endPos)], [jumpAt, translate(...startPos)]);
-  turnFrames.push([jumpAt, `transform:rotate(${angle}deg)`], [jumpAt, `transform:rotate(${startAngle}deg)`]);
   const headTrack = tl.keyframes(headFrames);
   const headPos = tl.useKeyframes(headTrack, 0);
+
+  const startAngle = snakeAngle(dirs[0] ?? 0);
+  let angle = startAngle;
+  const turnFrames: Frame[] = [[0, `transform:rotate(${angle}deg)`]];
+  for (let k = 1; k < lastStep; k++) {
+    const turn = (dirs[k] - dirs[k - 1] + 4) % 4;
+    if (turn === 0) continue;
+    const j = phaseOf(k);
+    turnFrames.push([at(k) - 0.3 * phases[j].s, `transform:rotate(${angle}deg)`]);
+    angle += turn === 1 ? 90 : -90;
+    turnFrames.push([at(k) + 0.3 * phases[j].s, `transform:rotate(${angle}deg)`]);
+  }
+  turnFrames.push([jumpAt, `transform:rotate(${angle}deg)`], [jumpAt, `transform:rotate(${startAngle}deg)`]);
   const headTurn = tl.track(turnFrames);
 
-  const wiggleFrames: Frame[] = [];
   const wiggleStart = PACE.intro + play + 0.05;
-  for (let k = 0; k < 8; k++) {
-    wiggleFrames.push([wiggleStart + k * 0.13, `transform:rotate(${k % 2 === 0 ? -16 : 16}deg)`]);
-  }
-  wiggleFrames.push([wiggleStart + 8 * 0.13, "transform:rotate(0deg)"]);
-  const headWiggle = tl.track(hasPlay ? [[0, "transform:rotate(0deg)"], ...wiggleFrames] : [[0, "transform:rotate(0deg)"]]);
-
-  const blink: Frame[] = [[0, "opacity:1"]];
+  const wiggleFrames: Frame[] = [[0, "transform:rotate(0deg)"]];
   if (hasPlay) {
-    for (let k = 0; k < 3; k++) {
-      const t = PACE.intro + play + 0.1 + k * 0.36;
-      blink.push([t, "opacity:1"], [t + 0.12, "opacity:.3"], [t + 0.24, "opacity:1"]);
+    for (let k = 0; k < 8; k++) {
+      wiggleFrames.push([wiggleStart + k * 0.13, `transform:rotate(${k % 2 === 0 ? -16 : 16}deg)`]);
     }
+    wiggleFrames.push([wiggleStart + 8 * 0.13, "transform:rotate(0deg)"]);
   }
-  blink.push([restore, "opacity:1"], [fadeEnd, "opacity:0"], [duration - 0.3, "opacity:0"], [duration, "opacity:1"]);
-  const snakeFade = tl.track(blink);
+  const headWiggle = tl.track(wiggleFrames);
+
+  // The jump back to the start happens while the snake is invisible; fading in only after it keeps the
+  // head from crawling over the restored graph.
+  const snakeFade = tl.track([
+    [0, "opacity:1"],
+    [restore - 0.4, "opacity:1"],
+    [restore - 0.1, "opacity:0"],
+    [jumpAt, "opacity:0"],
+    [duration, "opacity:1"],
+  ]);
 
   const growth = sim.eats.filter((e) => e.grew);
   const growTime = (m: number) => at(growth[m - 1].step);
   const taperShape = (j: number) => (j < TAPER.length ? TAPER[j] : 1);
-  const dark = isDark(theme);
-  const rim = dark ? theme.ink : "#000";
-  const tube: string[] = [];
-  const shadow: string[] = [];
+  const rim = dark ? theme.surface : theme.ink;
+  const rimOpacity = dark ? 1 : 0.8;
+
+  // Each speed gets its own copy of the body. Segment i trails the head by i steps, which is a fixed time lag
+  // only while the speed is constant, so a copy is shown for exactly the stretch its lag is right for.
+  const copies = phases.map((phase, j) => {
+    const lo = j === 0 ? 0 : Math.max(0, phase.from - growth.length - 2);
+    const hi = j + 1 < phases.length ? phases[j + 1].from : lastStep;
+    const frames = moveFrames(lo, hi, (k) => atIn(j, k)).filter(([t]) => t >= 0);
+    return { track: tl.keyframes(frames), s: phase.s };
+  });
+  const gates = copies.map((_, j) => {
+    if (copies.length === 1) return "";
+    const switchAt = starts[1];
+    return tl.track(
+      j === 0
+        ? [[0, "opacity:1"], [switchAt, "opacity:1"], [switchAt, "opacity:0"]]
+        : [[0, "opacity:0"], [switchAt, "opacity:0"], [switchAt, "opacity:1"]],
+    );
+  });
+
+  const tube: string[][] = copies.map(() => []);
+  const shadow: string[][] = copies.map(() => []);
   for (let i = growth.length; i >= 1; i--) {
     const frames: Frame[] = [[0, "opacity:0;transform:scale(.2)"]];
     for (let j = 0; j <= TAPER.length; j++) {
@@ -340,20 +404,37 @@ function render(ctx: GameContext): GameOutput {
     }
     frames.push([fadeEnd, frames[frames.length - 1][1]], [fadeEnd + 0.01, "opacity:0"]);
     const look = tl.track(frames);
-    const pos = tl.useKeyframes(headTrack, i * s);
-    const bridge = tl.useKeyframes(headTrack, (i - 0.5) * s);
-    const fill = levelColor(theme, growth[i - 1].cell);
-    const joint = i === 1 ? fill : mixColors(levelColor(theme, growth[i - 2].cell), fill);
-    const piece = (cls: string, size: number, color: string) =>
-      `<g class="${cls}"><rect class="${look}" x="${fmt(-size / 2)}" y="${fmt(-size / 2)}" width="${size}" height="${size}" rx="${fmt(size * 0.3)}" fill="${color}"/></g>`;
-    tube.push(piece(pos, BODY, fill), piece(bridge, BODY, joint));
-    shadow.push(piece(pos, BODY + 2 * OUTLINE, rim), piece(bridge, BODY + 2 * OUTLINE, rim));
+    const fill = spriteColor(theme, growth[i - 1].cell);
+    const joint = i === 1 ? fill : mixColors(spriteColor(theme, growth[i - 2].cell), fill);
+    copies.forEach((copy, j) => {
+      const pos = tl.useKeyframes(copy.track, i * copy.s);
+      const bridge = tl.useKeyframes(copy.track, (i - 0.5) * copy.s);
+      const piece = (cls: string, size: number, color: string) =>
+        `<g class="${cls}"><rect class="${look}" x="${fmt(-size / 2)}" y="${fmt(-size / 2)}" width="${size}" height="${size}" rx="${fmt(size * 0.32)}" fill="${color}"/></g>`;
+      tube[j].push(piece(pos, BODY, fill), piece(bridge, BODY, joint));
+      shadow[j].push(piece(pos, BODY + 2 * OUTLINE, rim), piece(bridge, BODY + 2 * OUTLINE, rim));
+    });
   }
+  const gated = (parts: string[][]) =>
+    parts.map((p, j) => (gates[j] ? `<g class="${gates[j]}">${p.join("")}</g>` : p.join(""))).join("");
 
   const baseCells: string[] = [];
   const foodCells: string[] = [];
+  const pops: string[] = [];
   const eatTime = new Map<Cell, number>();
   for (const e of sim.eats) eatTime.set(e.cell, at(e.step));
+  const popFrames: Frame[] = [
+    [0, "opacity:1;transform:scale(.6)"],
+    [EAT_HOLD, "opacity:1;transform:scale(1)"],
+    [EAT_HOLD + EAT_FADE, "opacity:0;transform:scale(2.3)"],
+  ];
+  const popTrack = tl.keyframes(popFrames);
+  const bigTrack = tl.keyframes([
+    [0, "opacity:1;transform:scale(.5)"],
+    [0.2, "opacity:1;transform:scale(1.4)"],
+    [0.7, "opacity:0;transform:scale(3.2)"],
+  ]);
+  const lastEat = sim.eats[sim.eats.length - 1]?.cell;
   for (const column of grid.cells) {
     for (const cell of column) {
       if (!cell) continue;
@@ -365,33 +446,62 @@ function render(ctx: GameContext): GameOutput {
         foodCells.push(cellRect(layout, cell, fill));
         continue;
       }
-      const rest = `fill:${fill};opacity:1;transform:scale(1)`;
       const cls = tl.track([
-        [0, rest],
-        [te - 0.6 * s, rest],
-        [te - 0.1 * s, `fill:${theme.accent};opacity:1;transform:scale(1.25)`],
-        [te + 0.5 * s, `fill:${theme.accent};opacity:0;transform:scale(1.9)`],
-        [restore, `fill:${fill};opacity:0;transform:scale(1)`],
-        [restore + PACE.restore, rest],
+        [0, "opacity:1"],
+        [te, "opacity:1"],
+        [te, "opacity:0"],
+        [restore, "opacity:0"],
+        [restore + PACE.restore, "opacity:1"],
       ]);
-      foodCells.push(cellRect(layout, cell, fill, `class="c ${cls}"`));
+      foodCells.push(cellRect(layout, cell, fill, `class="${cls}"`));
+      const [cx, cy] = cellCenter(layout, cell.x, cell.y);
+      const big = cell === lastEat;
+      const pop = tl.useKeyframes(big ? bigTrack : popTrack, te);
+      pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><use class="${pop}" href="#${big ? "pop-big" : "pop"}"/></g>`);
     }
   }
 
+  const spark = (n: number, radius: number, size: number) =>
+    Array.from({ length: n }, (_, k) => {
+      const a = (k / n) * Math.PI * 2 + 0.3;
+      const fill = k % 2 ? theme.accent : flash;
+      return `<circle cx="${fmt(Math.cos(a) * radius)}" cy="${fmt(Math.sin(a) * radius)}" r="${size}" fill="${fill}"/>`;
+    }).join("");
+  const flash = dark ? "#ffffff" : theme.accent;
+  const defs =
+    glowDefs(theme) +
+    `<g id="pop"><circle r="7" fill="none" stroke="${flash}" stroke-width="1.4"/>${spark(8, 7, 1.7)}</g>` +
+    `<g id="pop-big"><circle r="8" fill="none" stroke="${flash}" stroke-width="2"/><circle r="5" fill="none" stroke="${theme.accent}" stroke-width="2"/>${spark(12, 8, 2.1)}</g>`;
+
+  const clears: ClearEvent[] = sim.eats.map((e) => ({ t: at(e.step), cell: e.cell }));
+  const bar = hud(tl, grid, { theme, title: "SNAKE", clears, resetAt: restore, width });
+  const end = hasPlay
+    ? banner(tl, {
+        theme,
+        lines: stageClearLines(grid),
+        cx: width / 2,
+        cy: layout.top + layout.gridHeight / 2,
+        from: PACE.intro + play + 0.1,
+        to: restore,
+      })
+    : "";
+
   const head = `<g class="${headPos}"><g class="${headTurn}"><g class="${headWiggle}">
-<rect x="${-HEAD / 2}" y="${-HEAD / 2}" width="${HEAD}" height="${HEAD}" rx="4" fill="${theme.accent}" stroke="${theme.ink}" stroke-opacity=".3" stroke-width=".8"/>
-<circle cx="2.4" cy="-3" r="2.1" fill="#fff"/><circle cx="2.4" cy="3" r="2.1" fill="#fff"/>
-<circle cx="3.1" cy="-3" r="1.05" fill="#111"/><circle cx="3.1" cy="3" r="1.05" fill="#111"/>
-<path d="M6.5 0H10.5M10.5 0l2.2-1.7M10.5 0l2.2 1.7" stroke="#e5484d" stroke-width="1.1" stroke-linecap="round" fill="none" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;.55;.6;.8;.85" dur="1.4s" repeatCount="indefinite"/></path>
+<rect x="${-HEAD / 2}" y="${-HEAD / 2}" width="${HEAD}" height="${HEAD}" rx="${HEAD * 0.42}" fill="${theme.accent}" stroke="${rim}" stroke-opacity="${rimOpacity}" stroke-width="${OUTLINE}"/>
+<circle cx="2.6" cy="-3.4" r="2.4" fill="#fff"/><circle cx="2.6" cy="3.4" r="2.4" fill="#fff"/>
+<circle cx="3.4" cy="-3.4" r="1.2" fill="#111"/><circle cx="3.4" cy="3.4" r="1.2" fill="#111"/>
+<path d="M7.5 0H11.5M11.5 0l2.4-1.8M11.5 0l2.4 1.8" stroke="#e5484d" stroke-width="1.2" stroke-linecap="round" fill="none" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;.55;.6;.8;.85" dur="1.4s" repeatCount="indefinite"/></path>
 </g></g></g>`;
 
-  const css = `.c{transform-box:fill-box;transform-origin:center}\n${tl.css()}`;
   const bodyMarkup = [
     `<g>${baseCells.join("")}</g>`,
     `<g>${foodCells.join("")}</g>`,
-    `<g class="${snakeFade}"><g opacity="${dark ? 0.5 : 0.6}">${shadow.join("")}</g>${tube.join("")}${head}</g>`,
+    `<g class="${snakeFade}"${glowAttr(theme)}><g opacity="${rimOpacity}">${gated(shadow)}</g>${gated(tube)}${head}</g>`,
+    `<g>${pops.join("")}</g>`,
+    bar,
+    end,
   ].join("\n");
-  return { width, height, css, body: bodyMarkup };
+  return { width, height, css: tl.css(), defs, body: bodyMarkup };
 }
 
 export const snake: Game = { id: "snake", title: "Snake", render };

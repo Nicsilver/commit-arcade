@@ -89,6 +89,12 @@ test("snake play length stays inside the pacing targets", () => {
   }
 });
 
+test("snake uses the standard canvas and HUD", () => {
+  const svg = render(grids.sample);
+  assert.match(svg, /viewBox="0 0 896 216"/);
+  assert.ok(svg.includes('class="hud"'));
+});
+
 test("snake renders in every theme", () => {
   for (const theme of ["github-dark", "github-light", "neon"]) {
     assert.ok(render(grids.sample, theme).includes("<svg"));
