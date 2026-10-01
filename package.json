@@ -1,0 +1,24 @@
+{
+  "name": "commit-arcade",
+  "version": "0.1.0",
+  "description": "Classic arcade games played on your GitHub contribution graph, rendered as animated SVGs.",
+  "license": "MIT",
+  "author": "Nicolaj Jensen",
+  "repository": "github:Nicsilver/commit-arcade",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "node scripts/build.ts",
+    "demo": "node src/cli.ts --sample --game all --out demo",
+    "check": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  }
+}
