@@ -658,6 +658,36 @@ function flicker(frames: string[], period: number): string {
     .join("");
 }
 
+interface PoolEvent {
+  from: number;
+  to: number;
+  /** Builds the element, given the class that plays its track. */
+  make: (cls: string) => string;
+  /** The look at the start of the event first and, last, the invisible look it ends in. */
+  frames: Frame[];
+}
+
+/**
+ * Plays one-shot events on a few shared elements instead of one each: an element that waits
+ * invisibly for its moment still costs style work on every frame. Events that don't overlap take
+ * turns on the same element, which holds the look the last one ended in until the next starts.
+ */
+function playPooled(tl: Timeline, events: PoolEvent[]): string[] {
+  const hold = ";animation-timing-function:step-end";
+  const slots: { free: number; frames: Frame[]; make: PoolEvent["make"] }[] = [];
+  for (const ev of [...events].sort((a, b) => a.from - b.from)) {
+    const frames = ev.frames.map((f, i): Frame => (i === ev.frames.length - 1 ? [f[0], f[1] + hold] : f));
+    let slot = slots.find((s) => s.free <= ev.from);
+    if (!slot) {
+      slot = { free: 0, frames: [[0, frames[frames.length - 1][1]]], make: ev.make };
+      slots.push(slot);
+    }
+    slot.frames.push(...frames);
+    slot.free = ev.to;
+  }
+  return slots.map((s) => s.make(tl.track(s.frames)));
+}
+
 function render(ctx: GameContext): GameOutput {
   const { grid, theme } = ctx;
   const layout = arcadeLayout(grid);
@@ -717,20 +747,13 @@ function render(ctx: GameContext): GameOutput {
 
   const body: string[] = [];
   const clears: ClearEvent[] = [];
-  const css: string[] = [];
 
   const mushroomMarkup: string[] = [];
   const bulletMarkup: string[] = [];
   const segmentMarkup: string[] = [];
   const pestMarkup: string[] = [];
-  const burstMarkup: string[] = [];
   const popupMarkup: string[] = [];
   let playerMarkup = "";
-
-  const shift = (t: number) => {
-    const s = ((t % duration) + duration) % duration;
-    return s === 0 ? "0s" : `-${fmt(Math.round((duration - s) * 1000) / 1000)}s`;
-  };
 
   if (sim) {
     const stripCss = (state: number, opacity: number) => `opacity:${opacity};transform:translate(${-state * STRIP_PITCH}px,0)`;
@@ -755,27 +778,22 @@ function render(ctx: GameContext): GameOutput {
       if (m.day) clears.push({ t: T(m.states[m.states.length - 1].t), cell: m.day });
     }
 
-    const flights = new Map<string, string>();
-    const flightClass = (d: number, flight: number) => {
-      const key = `${Math.round(d * 2)}:${Math.round(flight * 500)}`;
-      let cls = flights.get(key);
-      if (!cls) {
-        const rest = `opacity:0;transform:translateY(${fmt(-d)}px)`;
-        const name = tl.keyframes([
-          [0, "opacity:1;transform:translateY(0)"],
-          [flight, `opacity:1;transform:translateY(${fmt(-d)}px)`],
-          [flight + 0.001, rest],
-        ]);
-        cls = `bf${flights.size}`;
-        css.push(`.${cls}{animation:${name} ${fmt(duration)}s linear infinite}`);
-        flights.set(key, cls);
-      }
-      return cls;
-    };
-    for (const b of sim.bullets) {
-      const cls = flightClass(b.y0 - b.y1, (b.t1 - b.t0) * scale);
-      bulletMarkup.push(`<use class="${cls}" href="#bl" x="${fmt(b.x)}" y="${fmt(b.y0)}" style="animation-delay:${shift(T(b.t0))}"/>`);
-    }
+    const bulletEvents: PoolEvent[] = sim.bullets.map((b) => {
+      const from = T(b.t0);
+      const to = from + (b.t1 - b.t0) * scale;
+      return {
+        key: "bullet",
+        from,
+        to: to + 0.001,
+        make: (cls) => `<use class="${cls}" href="#bl"/>`,
+        frames: [
+          [from, `opacity:1;${translate(b.x, b.y0)}`],
+          [to, `opacity:1;${translate(b.x, b.y1)}`],
+          [to + 0.001, `opacity:0;${translate(b.x, b.y1)}`],
+        ],
+      };
+    });
+    bulletMarkup.push(...playPooled(tl, bulletEvents));
 
     for (const s of sim.segments) {
       if (s.died === null) throw new Error("segment survived");
@@ -815,7 +833,7 @@ function render(ctx: GameContext): GameOutput {
 
     for (const e of sim.effects) {
       const color = e.kind === "chip" || e.kind === "crumble" ? spriteColor(theme, { level: e.level as Level }) : e.kind === "big" ? pal.head : pal.body;
-      burstMarkup.push(bursts.use(e.kind, e.x, e.y, T(e.t), color));
+      bursts.play(e.kind, e.x, e.y, T(e.t), color);
     }
 
     for (const p of sim.popups) {
@@ -858,12 +876,12 @@ function render(ctx: GameContext): GameOutput {
     `<g>${mushroomMarkup.join("")}</g>`,
     `<g>${bulletMarkup.join("")}</g>`,
     `<g${glowAttr(theme)}>${segmentMarkup.join("")}${pestMarkup.join("")}${playerMarkup}</g>`,
-    `<g>${burstMarkup.join("")}</g>`,
+    `<g>${bursts.markup(tl)}</g>`,
     `<g>${popupMarkup.join("")}</g>`,
     bar,
     end,
   );
-  return { width, height, css: `${tl.css()}\n${bursts.css()}\n${css.join("\n")}`, defs, body: body.join("\n") };
+  return { width, height, css: tl.css(), defs, body: body.join("\n") };
 }
 
 export const centipede: Game = { id: "centipede", title: "Centipede", render };
