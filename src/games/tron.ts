@@ -1,6 +1,7 @@
 import { Timeline, fmt, translate } from "../anim.ts";
 import type { Frame } from "../anim.ts";
 import { Bursts } from "../fx.ts";
+import type { BurstShape } from "../fx.ts";
 import { PACE, loopDuration, restoreAt } from "../game.ts";
 import type { Game, GameContext, GameOutput } from "../game.ts";
 import { activeCells } from "../grid.ts";
@@ -479,6 +480,8 @@ function paletteFor(theme: Theme): Palette {
   return { player: "#0969da", rival: "#e5580c", grid: "#cfd6de", gridOpacity: 0.8, border: "#0969da", glowStrength: 0 };
 }
 
+/** Days per clear counter; each clear restyles one group, while every group costs an animated element. */
+const CLEAR_GROUP = 14;
 const TRAIL_WIDTH = 4.4;
 const CORE_WIDTH = 1.7;
 
@@ -510,26 +513,41 @@ function render(ctx: GameContext): GameOutput {
     `<path d="${lines.join("")}" fill="none" stroke="${pal.grid}" stroke-opacity="${pal.gridOpacity}" stroke-width="1"/>` +
     `<rect x="${fmt(gx0)}" y="${fmt(gy0)}" width="${fmt(gx1 - gx0)}" height="${fmt(gy1 - gy0)}" rx="3" fill="none" stroke="${pal.border}" stroke-opacity="${dark ? 0.55 : 0.5}" stroke-width="1.6"/>`;
 
-  const filter = pal.glowStrength > 0
+  const glowing = pal.glowStrength > 0;
+  const trailAlpha = dark ? 0.9 : 1;
+  const filter = glowing
     ? `<filter id="tron-glow" filterUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${height}">` +
       `<feGaussianBlur in="SourceGraphic" stdDeviation="${fmt(theme.glow * 0.9)}" result="a"/>` +
       `<feGaussianBlur in="SourceGraphic" stdDeviation="${fmt(theme.glow * 2.6)}" result="b"/>` +
       `<feMerge><feMergeNode in="b"/><feMergeNode in="a"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
     : "";
-  const glow = pal.glowStrength > 0 ? ` filter="url(#tron-glow)"` : "";
+  const glow = glowing ? ` filter="url(#tron-glow)"` : "";
 
   const bursts = new Bursts(duration);
   const pixels = [
     [-14, -14], [0, -18], [14, -14], [-18, 0], [18, 0], [-14, 14], [0, 18], [14, 14],
   ].map(([dx, dy]) => ({ dx, dy, size: 4.4 }));
-  bursts.define("derez", { life: 0.55, sparks: pixels });
   const crackle = Array.from({ length: 20 }, (_, i) => {
     const a = (i / 20) * Math.PI * 2 + 0.2;
     const r = 26 + ((i * 7) % 5) * 5;
     return { dx: Math.cos(a) * r, dy: Math.sin(a) * r, size: 4 + (i % 3) };
   });
-  bursts.define("crash", { life: 1.1, sparks: crackle, ring: 28, ringWidth: 2.6, flash: 9, flashColor: "#ffffff" });
-  bursts.define("crashRing", { life: 0.8, sparks: [], ring: 40, ringWidth: 1.8 });
+  const burstShapes: Record<string, BurstShape> = {
+    derez: { life: 0.55, sparks: pixels },
+    crash: { life: 1.1, sparks: crackle, ring: 28, ringWidth: 2.6, flash: 9, flashColor: "#ffffff" },
+    crashRing: { life: 0.8, sparks: [], ring: 40, ringWidth: 1.8 },
+  };
+  for (const [id, shape] of Object.entries(burstShapes)) bursts.define(id, shape);
+
+  const burstDef = (id: string, shape: BurstShape) => {
+    const parts: string[] = [];
+    if (shape.flash) parts.push(`<circle r="${fmt(shape.flash)}" fill="${shape.flashColor ?? "#fff"}"/>`);
+    if (shape.ring) parts.push(`<circle r="${fmt(shape.ring)}" fill="none" stroke="currentColor" stroke-width="${shape.ringWidth ?? 1.6}"/>`);
+    for (const s of shape.sparks) {
+      parts.push(`<rect x="${fmt(s.dx - s.size / 2)}" y="${fmt(s.dy - s.size / 2)}" width="${fmt(s.size)}" height="${fmt(s.size)}" fill="currentColor"/>`);
+    }
+    return `<g id="fx-${id}">${parts.join("")}</g>`;
+  };
 
   const cells: string[] = [];
   for (const column of grid.cells) for (const cell of column) if (cell) cells.push(cellRect(layout, cell, theme.empty));
@@ -537,7 +555,6 @@ function render(ctx: GameContext): GameOutput {
   const body: string[] = [];
   const clears: ClearEvent[] = [];
   const dayMarkup: string[] = [];
-  const burstMarkup: string[] = [];
   const trailMarkup: string[] = [];
   const cycleMarkup: string[] = [];
 
@@ -552,13 +569,12 @@ function render(ctx: GameContext): GameOutput {
       `<rect x="9" y="-1.2" width="2.6" height="2.4" fill="#ffffff"/></g>`
     );
   };
-  const defs = filter + `<g id="cyc0">${cycleDef(pal.player)}</g><g id="cyc1">${cycleDef(pal.rival)}</g>` + bursts.defs();
 
   if (sim) {
     const point = (id: number): [number, number] => cellCenter(layout, ...cellCoord(sim.arena, id));
     const jumpAt = restore + 0.3;
 
-    const trailGroups: string[] = [];
+    const trailBodies: string[] = [];
     sim.cycles.forEach((cy, which) => {
       const color = which === 0 ? pal.player : pal.rival;
       const core = dark ? "#ffffff" : mix(color, "#ffffff", 0.55);
@@ -566,58 +582,55 @@ function render(ctx: GameContext): GameOutput {
       const dirsOf = (i: number) => directionOf(sim.arena, cy.cells[i - 1], cy.cells[i]);
       const dtAt = (i: number) => (i + 1 < n ? cy.head[i + 1] - cy.head[i] : i > 0 ? cy.head[i] - cy.head[i - 1] : 1);
 
-      let a = 0;
-      while (a < n - 1) {
-        let b = a + 1;
-        const d = dirsOf(b);
-        while (b + 1 < n && dirsOf(b + 1) === d) b++;
-        const [sx, sy] = point(cy.cells[a]);
-        const len = (b - a) * layout.pitch;
-        const ext = len + TRAIL_WIDTH;
-        const gOf = (i: number) => ((i - a) * layout.pitch + TRAIL_WIDTH) / ext;
-        const fixedHead = (t: number) => {
-          if (t <= cy.head[a]) return 0;
-          if (t >= cy.head[b]) return 1;
-          let i = a;
-          while (i + 1 < b && cy.head[i + 1] <= t) i++;
-          const f = (t - cy.head[i]) / (cy.head[i + 1] - cy.head[i]);
-          return gOf(i) + (gOf(i + 1) - gOf(i)) * f;
-        };
-        const tailPos = (t: number) => {
-          if (t <= cy.tail[a]) return 0;
-          let i = a;
-          while (i < b && cy.tail[i + 1] <= t) i++;
-          if (i >= b) return 1;
-          const span = cy.tail[i + 1] - cy.tail[i];
-          const f = Number.isFinite(span) && span > 0 ? (t - cy.tail[i]) / span : 0;
-          return ((i - a + f) * layout.pitch) / ext;
-        };
-        const times = new Set<number>([cy.head[a], cy.head[b]]);
-        for (let i = a + 1; i < b; i++) if (Math.abs(dtAt(i) - dtAt(i - 1)) > 1e-6) times.add(cy.head[i]);
-        let tailEnds = false;
-        for (let i = a; i <= b; i++) {
-          const t = cy.tail[i];
-          if (!Number.isFinite(t)) break;
-          if (i === a || i === b || Math.abs((cy.tail[Math.min(i + 1, n - 1)] - t) - (t - cy.tail[Math.max(i - 1, 0)])) > 1e-6) times.add(t);
-          if (i === b) tailEnds = true;
-        }
-        const css = (g: number, dd: number) => `transform:translate(${fmt(dd * ext)}px,0) scale(${fmt(Math.max(0, g - dd))},1)`;
-        const frames: Frame[] = [[0, css(0, 0)]];
-        const sorted = [...times].sort((p, q) => p - q);
-        for (const t of sorted) {
-          if (t === cy.head[a]) frames.push([T(t), css(0, 0)]);
-          frames.push([T(t), css(fixedHead(t), tailPos(t))]);
-        }
-        if (tailEnds && Number.isFinite(cy.tail[b])) frames.push([T(cy.tail[b]), css(1, 1)]);
-        const cls = tl.track(frames);
-        const angle = d * 90;
-        trailGroups.push(
-          `<g transform="translate(${fmt(sx - (TRAIL_WIDTH / 2) * DX[d])} ${fmt(sy - (TRAIL_WIDTH / 2) * DY[d])}) rotate(${angle})"><g class="${cls}">` +
-            `<rect x="0" y="${-TRAIL_WIDTH / 2}" width="${fmt(ext)}" height="${TRAIL_WIDTH}" rx="1" fill="${color}" fill-opacity="${dark ? 0.9 : 1}"/>` +
-            `<rect x="0" y="${-CORE_WIDTH / 2}" width="${fmt(ext)}" height="${CORE_WIDTH}" fill="${core}"/></g></g>`,
-        );
-        a = b;
+      // The whole path the cycle will ever drive is drawn once per layer, and a dash window slides along it from
+      // the tail to the head. A stroked path unions its own overlaps, so the halo layers cannot stack at corners.
+      const pts = cy.cells.map(point);
+      const d: string[] = [`M${fmt(pts[0][0])} ${fmt(pts[0][1])}`];
+      for (let i = 1; i < n; i++) {
+        const straight = i + 1 < n && (pts[i + 1][0] - pts[i][0]) * (pts[i][1] - pts[i - 1][1]) === (pts[i + 1][1] - pts[i][1]) * (pts[i][0] - pts[i - 1][0]);
+        if (!straight) d.push(`L${fmt(pts[i][0])} ${fmt(pts[i][1])}`);
       }
+      const path = d.join("");
+      const pitch = layout.pitch;
+      const total = (n - 1) * pitch;
+
+      // Head and tail as (time, distance along the path) lines, with the straight stretches dropped.
+      const line = (times: number[]): [number, number][] => {
+        const all = times.map((time, i): [number, number] => [T(time), i * pitch]).filter(([time]) => Number.isFinite(time));
+        return all.filter((pt, i) => {
+          if (i === 0 || i === all.length - 1) return true;
+          const [t0, a0] = all[i - 1];
+          const [t1, a1] = all[i + 1];
+          return Math.abs((pt[1] - a0) * (t1 - pt[0]) - (a1 - pt[1]) * (pt[0] - t0)) > 1e-7;
+        });
+      };
+      const at = (pts: [number, number][], time: number): [number, number] => {
+        const same = pts.filter(([pt]) => Math.abs(pt - time) < 1e-9);
+        if (same.length) return [same[0][1], same[same.length - 1][1]];
+        if (time < pts[0][0]) return [0, 0];
+        if (time > pts[pts.length - 1][0]) return [total, total];
+        const i = pts.findIndex(([pt]) => pt > time);
+        const [t0, a0] = pts[i - 1];
+        const [t1, a1] = pts[i];
+        const v = a0 + ((a1 - a0) * (time - t0)) / (t1 - t0);
+        return [v, v];
+      };
+      const heads = line(cy.head);
+      const tails = line(cy.tail);
+      const knots = [...new Set([0, duration, ...heads.map(([pt]) => pt), ...tails.map(([pt]) => pt)])].sort((p, q) => p - q);
+      const window = (s: number, e: number) =>
+        `visibility:${e - s > 1e-6 ? "visible" : "hidden"};stroke-dasharray:${fmt(e - s)}px ${fmt(total + 2 * TRAIL_WIDTH)}px;stroke-dashoffset:${fmt(-s)}px`;
+      const slide: Frame[] = [];
+      for (const time of knots) {
+        const [e0, e1] = at(heads, time);
+        const [s0, s1] = at(tails, time);
+        slide.push([time, window(s0, e0)]);
+        if (s0 !== s1 || e0 !== e1) slide.push([time, window(s1, e1)]);
+      }
+      const keys = tl.keyframes(slide);
+      const stroke = (width: number, color: string, opacity: number, cap: string, join: string) =>
+        `<path class="${tl.useKeyframes(keys, 0)}" d="${path}" fill="none" stroke="${color}" stroke-opacity="${opacity}" stroke-width="${fmt(width)}" stroke-linecap="${cap}" stroke-linejoin="${join}"/>`;
+      trailBodies.push(stroke(TRAIL_WIDTH, color, trailAlpha, "square", "miter"), stroke(CORE_WIDTH, core, 1, "square", "miter"));
 
       const start = point(cy.cells[0]);
       const end = point(cy.cells[n - 1]);
@@ -658,34 +671,54 @@ function render(ctx: GameContext): GameOutput {
       const visClass = tl.track(vis);
       cycleMarkup.push(`<g class="${visClass}"><g class="${pos}"><g class="${rot}"><use href="#cyc${which}"/></g></g></g>`);
     });
-    trailMarkup.push(`<g>${trailGroups.join("")}</g>`);
+    trailMarkup.push(trailBodies.join(""));
 
+    // Days: still ones are plain rects that read how many of their group have been cleared; the clearing flash
+    // is played on a few shared rects.
     const cleared = new Map<Cell, number>();
     for (const e of sim.derez) cleared.set(e.cell, T(e.t));
+    const days: { cell: Cell; te: number }[] = [];
     for (const column of grid.cells) {
       for (const cell of column) {
         if (!cell || cell.level === 0) continue;
-        const fill = levelColor(theme, cell);
-        const flashFill = dark ? mix(spriteColor(theme, cell), "#ffffff", 0.75) : spriteColor(theme, cell);
         const te = cleared.get(cell);
         if (te === undefined) throw new Error("a day was never reached");
-        const cls = tl.track([
-          [0, `opacity:1;transform:scale(1);fill:${fill}`],
-          [te, `opacity:1;transform:scale(1);fill:${fill}`],
-          [te + 0.05, `opacity:1;transform:scale(1.15);fill:${flashFill}`],
-          [te + 0.22, `opacity:0;transform:scale(1.5);fill:${flashFill}`],
-          [restore, `opacity:0;transform:scale(1);fill:${fill}`],
-          [fadeEnd, `opacity:1;transform:scale(1);fill:${fill}`],
-        ]);
-        dayMarkup.push(cellRect(layout, cell, fill, `class="d ${cls}"`));
-        const [cx, cy] = cellCenter(layout, cell.x, cell.y);
-        burstMarkup.push(bursts.use("derez", cx, cy, te, spriteColor(theme, cell)));
-        clears.push({ t: te, cell });
+        days.push({ cell, te });
       }
+    }
+    days.sort((p, q) => p.te - q.te);
+    const flashes: Play[] = [];
+    const half = layout.cell / 2;
+    for (let first = 0; first < days.length; first += CLEAR_GROUP) {
+      const members = days.slice(first, first + CLEAR_GROUP);
+      const counter: Frame[] = [[0, "opacity:1;--n:0"]];
+      members.forEach(({ te }, i) => counter.push([te, `opacity:1;--n:${i}`], [te, `opacity:1;--n:${i + 1}`]));
+      counter.push([restore, `opacity:1;--n:${members.length}`], [restore, "opacity:0;--n:0"], [fadeEnd, "opacity:1;--n:0"]);
+      const rects = members.map(({ cell }, i) => cellRect(layout, cell, levelColor(theme, cell), `class="k" style="--i:${i + 1}"`));
+      dayMarkup.push(`<g class="${tl.track(counter)}" style="--n:0">${rects.join("")}</g>`);
+    }
+    for (const { cell, te } of days) {
+      const fill = levelColor(theme, cell);
+      const flashFill = dark ? mix(spriteColor(theme, cell), "#ffffff", 0.75) : spriteColor(theme, cell);
+      const [cx, cy] = cellCenter(layout, cell.x, cell.y);
+      const look = (scale: number, opacity: number, color: string) => `opacity:${opacity};${translate(cx, cy, `scale(${scale})`)};fill:${color}`;
+      flashes.push({
+        frames: [
+          [te, look(1, 1, fill)],
+          [te + 0.05, look(1.15, 1, flashFill)],
+          [te + 0.22, look(1.5, 0, flashFill)],
+        ],
+      });
+      bursts.play("derez", cx, cy, te, spriteColor(theme, cell));
+      clears.push({ t: te, cell });
+    }
+    for (const frames of pooled(flashes)) {
+      dayMarkup.push(`<rect class="${tl.track(frames)}" x="${fmt(-half)}" y="${fmt(-half)}" width="${layout.cell}" height="${layout.cell}" rx="${layout.radius}"/>`);
     }
     const [cx, cy] = cellCenter(layout, sim.crash.x, sim.crash.y);
     const tc = T(sim.crash.t);
-    burstMarkup.push(bursts.use("crash", cx, cy, tc, pal.rival), bursts.use("crashRing", cx, cy, tc + 0.12, pal.player));
+    bursts.play("crash", cx, cy, tc, pal.rival);
+    bursts.play("crashRing", cx, cy, tc + 0.12, pal.player);
   } else {
     for (const column of grid.cells) {
       for (const cell of column) if (cell && cell.level > 0) dayMarkup.push(cellRect(layout, cell, levelColor(theme, cell)));
@@ -695,6 +728,11 @@ function render(ctx: GameContext): GameOutput {
     cycleMarkup.push(`<g transform="translate(${fmt(x)} ${fmt(y)})"><use href="#cyc0"/></g>`);
     cycleMarkup.push(`<g transform="translate(${fmt(x2)} ${fmt(y)}) rotate(180)"><use href="#cyc1"/></g>`);
   }
+
+  const defs =
+    filter +
+    `<g id="cyc0">${cycleDef(pal.player)}</g><g id="cyc1">${cycleDef(pal.rival)}</g>` +
+    Object.entries(burstShapes).map(([id, shape]) => burstDef(id, shape)).join("");
 
   const bar = hud(tl, grid, { theme, title: "TRON", clears, resetAt: restore, width });
   const end = sim
@@ -711,12 +749,37 @@ function render(ctx: GameContext): GameOutput {
     `<g>${gridMarkup}</g>`,
     `<g>${cells.join("")}</g>`,
     `<g>${dayMarkup.join("")}</g>`,
-    `<g${glow}>${trailMarkup.join("")}${cycleMarkup.join("")}${burstMarkup.join("")}</g>`,
+    `<g${glow}>${trailMarkup.join("")}${cycleMarkup.join("")}${sim ? bursts.markup(tl) : ""}</g>`,
     bar,
     end,
   );
-  return { width, height, css: `.d{transform-box:fill-box;transform-origin:center}
-${tl.css()}\n${bursts.css()}`, defs, body: body.join("\n") };
+  return { width, height, css: `.k{opacity:clamp(0,calc(var(--i) - var(--n)),1)}\n${tl.css()}`, defs, body: body.join("\n") };
+}
+
+interface Play {
+  /** Absolute-time frames; the first is when the thing appears and the last leaves it hidden. */
+  frames: Frame[];
+}
+
+/**
+ * Packs one-shot things onto as few elements as possible: an element with its own animation costs style work
+ * on every frame even while it sits hidden, so a slot is reused as soon as its previous thing is over.
+ */
+function pooled(plays: Play[]): Frame[][] {
+  const slots: { free: number; last: string; frames: Frame[] }[] = [];
+  for (const play of [...plays].sort((p, q) => p.frames[0][0] - q.frames[0][0])) {
+    const [start] = play.frames[0];
+    const [end, rest] = play.frames[play.frames.length - 1];
+    let slot = slots.find((s) => s.free <= start);
+    if (!slot) {
+      slot = { free: 0, last: rest, frames: [[0, rest]] };
+      slots.push(slot);
+    }
+    slot.frames.push([start, slot.last], ...play.frames);
+    slot.free = end;
+    slot.last = rest;
+  }
+  return slots.map((s) => s.frames);
 }
 
 function cellCoord(a: Arena, id: number): [number, number] {
