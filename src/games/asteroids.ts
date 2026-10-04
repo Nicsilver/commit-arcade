@@ -781,6 +781,41 @@ export function playAsteroids(ctx: GameContext): AsteroidsPlay {
 
 const f1 = (n: number) => String(Math.round(n * 10) / 10);
 
+interface PoolEvent {
+  /** Slots are shared only between events with the same key. */
+  key: string;
+  from: number;
+  to: number;
+  /** Builds the element, given the class that plays its track. */
+  make: (cls: string) => string;
+  /** The look at the start of the event first and, last, the invisible look it ends in. */
+  frames: Frame[];
+}
+
+/**
+ * Plays one-shot events on a few shared elements instead of one each: an element that waits
+ * invisibly for its moment still costs style work on every frame, and a play has hundreds of
+ * shots, sparks and shards. Events that don't overlap take turns on the same element, which holds
+ * the look the last one ended in until the next one starts.
+ */
+function playPooled(tl: Timeline, events: PoolEvent[]): string[] {
+  const hold = ";animation-timing-function:step-end";
+  const slots: { key: string; free: number; frames: Frame[]; make: PoolEvent["make"] }[] = [];
+  for (const ev of [...events].sort((a, b) => a.from - b.from)) {
+    const frames = ev.frames.map((f, i): Frame => (i === ev.frames.length - 1 ? [f[0], f[1] + hold] : f));
+    let slot = slots.find((s) => s.key === ev.key && s.free <= ev.from);
+    if (!slot) {
+      slot = { key: ev.key, free: 0, frames: [[0, frames[frames.length - 1][1]]], make: ev.make };
+      slots.push(slot);
+    }
+    slot.frames.push(...frames);
+    slot.free = ev.to;
+  }
+  return slots.map((s) => s.make(tl.track(s.frames)));
+}
+
+const SHARD_TEMPLATES = 4;
+
 const SLOTS = 16;
 const DRIFT_DISTS = [27, 16, 9];
 
@@ -939,14 +974,6 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
     return tl.useKeyframes(name, L(at));
   };
 
-  const burst = tl.keyframes([
-    [0, "transform:scale(.35);opacity:1;animation-timing-function:ease-out"],
-    [0.3, "transform:scale(1.9);opacity:0"],
-  ]);
-  const flash = tl.keyframes([
-    [0, "transform:scale(.5);opacity:1;animation-timing-function:ease-out"],
-    [0.16, "transform:scale(1.6);opacity:0"],
-  ]);
   const implode = tl.keyframes([
     [0, "transform:scale(2.4);opacity:0;animation-timing-function:ease-in"],
     [0.2, "transform:scale(1.7);opacity:.9"],
@@ -993,32 +1020,87 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
   }
   body.unshift(...rest);
 
-  const spark = (x: number, y: number, scale: number, at: number, color: string) =>
-    `<g transform="translate(${f1(x)} ${f1(y)})${scale === 1 ? "" : ` scale(${scale})`}">` +
-    `<g class="${tl.useKeyframes(burst, L(at))}"><use href="#sp"/><use href="#se" color="${color}"/></g>` +
-    `<circle r="3.4" class="fl ${tl.useKeyframes(flash, L(at))}"/></g>`;
+  const sparkEvents: PoolEvent[] = [];
+  const spark = (x: number, y: number, scale: number, at: number, color: string) => {
+    const t = L(at);
+    const look = (k: number, opacity: number, ease = "") =>
+      `opacity:${opacity};transform:translate(${f1(x)}px,${f1(y)}px) scale(${fmt(scale * k)})${ease ? `;animation-timing-function:${ease}` : ""}`;
+    sparkEvents.push(
+      {
+        key: `burst:${color}`,
+        from: t,
+        to: t + 0.3,
+        make: (cls) => `<g class="${cls}"><use href="#sp"/><use href="#se" color="${color}"/></g>`,
+        frames: [[t, look(0.35, 1, "ease-out")], [t + 0.3, look(1.9, 0)]],
+      },
+      {
+        key: "flash",
+        from: t,
+        to: t + 0.16,
+        make: (cls) => `<circle r="3.4" class="fl ${cls}"/>`,
+        frames: [[t, look(0.5, 1, "ease-out")], [t + 0.16, look(1.6, 0)]],
+      },
+    );
+  };
+
+  // A handful of cracked-cell layouts reused with random turns and flips: the pieces still tile the
+  // cell, and each distinct piece shape can then share one element across all the shots.
+  const shardRng = createRng("asteroids-shards");
+  const shardTemplates = new Map<number, ReturnType<typeof shatter>[]>();
+  const templatesFor = (count: number) => {
+    let list = shardTemplates.get(count);
+    if (!list) {
+      list = Array.from({ length: SHARD_TEMPLATES }, () => shatter(shardRng, layout.cell, count));
+      shardTemplates.set(count, list);
+    }
+    return list;
+  };
+  const shardEvents: PoolEvent[] = [];
+  const shard = (key: string, points: string, x: number, y: number, angle: number, dist: number, spin: number, turns: number, flip: number, fill: string, at: number) => {
+    const bx = Math.round(x * 10) / 10;
+    const by = Math.round(y * 10) / 10;
+    const mirror = flip < 0 ? " scale(-1,1)" : "";
+    const frames: Frame[] = [0, 0.12, 0.3, 0.55, 1].map((s) => {
+      const e = 1 - (1 - s) * (1 - s);
+      const op = s < 0.4 ? 1 : 1 - (s - 0.4) / 0.6;
+      const keep = s === 0 || s === 1 ? `;fill:${fill}` : "";
+      return [
+        L(at) + s * DEBRIS_LIFE,
+        `opacity:${fmt(op)}${keep};transform:translate(${f1(bx + Math.cos(angle) * dist * e)}px,${f1(by + Math.sin(angle) * dist * e)}px) rotate(${f1(turns * 90 + spin * e)}deg)${mirror}`,
+      ];
+    });
+    shardEvents.push({
+      key,
+      from: L(at),
+      to: L(at) + DEBRIS_LIFE,
+      make: (cls) => `<polygon class="rd ${cls}" points="${points}"/>`,
+      frames,
+    });
+  };
 
   const debris: string[] = [];
-  const sparks: string[] = [];
   const rocksOut: string[] = [];
-  const bulletsOut: string[] = [];
   for (const hit of play.hits) {
     const c = hit.cell;
     const [cx, cy] = cellCenter(layout, c.x, c.y);
     if (!hit.split) {
       const count = c.level >= 4 ? 4 : c.level === 3 ? 3 : 2 + Math.floor(rng() * 2);
-      for (const piece of shatter(rng, layout.cell, count)) {
-        const outward = Math.atan2(piece.cy, piece.cx);
-        const vx = Math.cos(outward) * 0.7 + Math.cos(hit.dir) * 0.9;
-        const vy = Math.sin(outward) * 0.7 + Math.sin(hit.dir) * 0.9;
-        const x = cx + piece.cx;
-        const y = cy + piece.cy;
-        debris.push(
-          `<g transform="translate(${f1(x)} ${f1(y)})"><polygon class="r${c.level} ${driftClass(x, y, vx, vy, hit.t)}" points="${piece.points}"/></g>`,
-        );
-      }
+      const ti = Math.floor(rng() * SHARD_TEMPLATES);
+      const turns = Math.floor(rng() * 4);
+      const flip = rng() < 0.5 ? -1 : 1;
+      templatesFor(count)[ti].forEach((piece, pi) => {
+        const fx = flip * piece.cx;
+        const [px, py] = [[fx, piece.cy], [-piece.cy, fx], [-fx, -piece.cy], [piece.cy, -fx]][turns];
+        const outward = Math.atan2(py, px);
+        const x = cx + px;
+        const y = cy + py;
+        const { slot, dist } = driftPlan(x, y, Math.cos(outward) * 0.7 + Math.cos(hit.dir) * 0.9, Math.sin(outward) * 0.7 + Math.sin(hit.dir) * 0.9, dbox);
+        const variant = Math.floor(rng() * 4);
+        const spin = (variant & 1 ? -1 : 1) * (variant & 2 ? 300 : 190);
+        shard(`${count}.${ti}.${pi}`, piece.points, x, y, (slot / SLOTS) * Math.PI * 2, dist, spin, turns, flip, spriteColor(theme, c), hit.t);
+      });
     }
-    sparks.push(spark(hit.point.x, hit.point.y, hit.split ? 1.25 : 1, hit.t, theme.sprites[3]));
+    spark(hit.point.x, hit.point.y, hit.split ? 1.25 : 1, hit.t, theme.sprites[3]);
   }
 
   const hitOf = new Map(play.rockHits.map((h) => [h.rock, h]));
@@ -1027,7 +1109,7 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
     const life = r.t1 - r.t0;
     const pose = (t: number, scale: number, opacity: number): string => {
       const p = rockAt(r, t);
-      return `opacity:${opacity};transform:translate(${fmt(p.x)}px,${fmt(p.y)}px) scale(${scale})`;
+      return `opacity:${opacity};transform:translate(${fmt(p.x)}px,${fmt(p.y)}px) scale(${scale}) rotate(${fmt(r.spin * (t - r.t0))}deg)`;
     };
     const grow = Math.min(0.14, life);
     const frames: Frame[] = [
@@ -1041,17 +1123,11 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
       [L(r.t1), pose(r.t1, 1, 1)],
       [L(r.t1) + eps, pose(r.t1, 1, 0)],
     ];
-    const turn = tl.track([
-      [L(r.t0), "transform:rotate(0deg)"],
-      [L(r.t1), `transform:rotate(${fmt(r.spin * life)}deg)`],
-    ]);
     const points = rockCorners(r, 0).map((p) => `${f1(p.x)},${f1(p.y)}`).join(" ");
-    rocksOut.push(
-      `<g class="${tl.track(frames)}"><polygon class="rock ${turn}" fill="${spriteColor(theme, r.cell)}" points="${points}"/></g>`,
-    );
+    rocksOut.push(`<polygon class="rock ${tl.track(frames)}" fill="${spriteColor(theme, r.cell)}" points="${points}"/>`);
 
     const end = rockAt(r, r.t1);
-    sparks.push(spark(h.point.x, h.point.y, 1.1, r.t1, theme.sprites[3]));
+    spark(h.point.x, h.point.y, 1.1, r.t1, theme.sprites[3]);
     const heading = Math.atan2(r.vy, r.vx);
     for (const w of rockWedges(r, r.spin * life)) {
       const x = end.x + w.cx;
@@ -1064,19 +1140,26 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
       );
     }
   }
+  debris.unshift(...playPooled(tl, shardEvents));
+  const sparks = playPooled(tl, sparkEvents);
 
-  for (const b of play.bullets) {
+  const bulletEvents: PoolEvent[] = play.bullets.map((b) => {
     const from = `transform:translate(${fmt(b.from.x)}px,${fmt(b.from.y)}px)`;
     const to = `transform:translate(${fmt(b.to.x)}px,${fmt(b.to.y)}px)`;
-    const cls = tl.track([
-      [0, `opacity:0;${from}`],
-      [L(b.t0), `opacity:0;${from}`],
-      [L(b.t0) + eps, `opacity:1;${from}`],
-      [L(b.t1), `opacity:1;${to}`],
-      [L(b.t1) + eps, `opacity:0;${to}`],
-    ]);
-    bulletsOut.push(`<use href="#bl" class="${cls}"/>`);
-  }
+    return {
+      key: "bullet",
+      from: L(b.t0),
+      to: L(b.t1) + eps,
+      make: (cls) => `<use href="#bl" class="${cls}"/>`,
+      frames: [
+        [L(b.t0), `opacity:0;${from}`],
+        [L(b.t0) + eps, `opacity:1;${from}`],
+        [L(b.t1), `opacity:1;${to}`],
+        [L(b.t1) + eps, `opacity:0;${to}`],
+      ],
+    };
+  });
+  const bulletsOut = playPooled(tl, bulletEvents);
 
   let saucerOut = "";
   const ringAt = (p: Pt, kf: string, t: number, r = 15) =>
@@ -1170,7 +1253,7 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
   const glow = glowAttr(theme);
   const css = [
     tl.css(),
-    ...[1, 2, 3, 4].map((l) => `.r${l}{fill:${spriteColor(theme, { level: l as 1 | 2 | 3 | 4 })};fill-opacity:.55;stroke:${ink};stroke-width:1;stroke-linejoin:round;stroke-opacity:.9}`),
+    `.rd{fill-opacity:.55;stroke:${ink};stroke-width:1;stroke-linejoin:round;stroke-opacity:.9}`,
     `.rock{fill-opacity:.5;stroke:${ink};stroke-width:1.3;stroke-linejoin:round}`,
     `.fl{fill:${ink};opacity:0}`,
     `.halo{fill:none;stroke:${ink};stroke-width:4.4;stroke-opacity:.28;stroke-linejoin:round;stroke-linecap:round}`,
@@ -1191,11 +1274,8 @@ function renderAsteroids(ctx: GameContext, play: AsteroidsPlay): GameOutput {
       ...body,
       score,
       ...debris,
-      `<g${glow}>${rocksOut.join("")}</g>`,
-      `<g${glow}>${sparks.join("")}</g>`,
-      `<g${glow}>${bulletsOut.join("")}</g>`,
-      `<g${glow}>${saucerOut}${rings.join("")}</g>`,
-      `<g${glow}>${ship}</g>`,
+      // One glow group: each filtered group blurs the whole canvas area on every frame.
+      `<g${glow}>${rocksOut.join("")}${sparks.join("")}${bulletsOut.join("")}${saucerOut}${rings.join("")}${ship}</g>`,
       text,
     ].join(""),
   };
