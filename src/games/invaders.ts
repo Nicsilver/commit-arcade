@@ -5,7 +5,7 @@ import type { Rng } from "../rng.ts";
 import { arcadeLayout, banner, glowAttr, glowDefs, hud, spriteColor, stageClearLines, type ClearEvent } from "../kit.ts";
 import { cellRect, type Layout } from "../svg.ts";
 import type { Theme } from "../theme.ts";
-import { bitmapPath, pixelText } from "../pixel-font.ts";
+import { bitmapPath, bitmapRects, pixelText } from "../pixel-font.ts";
 
 const OCTOPUS = [
   [
@@ -142,6 +142,8 @@ const SHOT_CHIPS_PER_BUNKER = 2;
 const BUNKER_LANE_COST = 70;
 const SHOT_H = 10;
 const SHOT_LEAD = 6;
+/** Invaders per kill counter; each kill restyles one group, while every group costs an animated element. */
+const KILL_GROUP = 14;
 
 interface Field {
   layout: Layout;
@@ -551,6 +553,44 @@ export function simulateInvaders(grid: Grid, rng: Rng): InvadersPlay {
   return play;
 }
 
+interface Play {
+  /** Absolute-time frames; the first is when the thing appears and the last leaves it invisible. */
+  frames: Frame[];
+}
+
+/**
+ * Plays one-shot things (shots, bombs, blasts) on as few elements as possible. An element with its own
+ * animation costs style work on every frame even while it sits invisible, so each slot is reused as soon
+ * as the previous thing on it has finished.
+ */
+function pooled(tl: Timeline, plays: Play[]): string[] {
+  const slots: { free: number; last: string; frames: Frame[] }[] = [];
+  for (const play of [...plays].sort((p, q) => p.frames[0][0] - q.frames[0][0])) {
+    const [start] = play.frames[0];
+    const [end, rest] = play.frames[play.frames.length - 1];
+    let slot = slots.find((s) => s.free <= start);
+    if (!slot) {
+      slot = { free: 0, last: rest, frames: [[0, rest]] };
+      slots.push(slot);
+    }
+    slot.frames.push([start, slot.last], ...play.frames);
+    slot.free = end;
+    slot.last = rest;
+  }
+  return slots.map((s) => tl.track(s.frames));
+}
+
+/** What a round-joined stroke `reach` wide would cover around the bitmap, as the union of rounded rectangles. */
+function haloPath(rows: string[], scale: number, reach: number): string {
+  return bitmapRects(rows)
+    .map((r) => {
+      const [x0, y0, x1, y1] = [r.x * scale - reach, r.y * scale - reach, r.end * scale + reach, (r.y + r.h) * scale + reach];
+      const arc = (x: number, y: number) => `A${reach} ${reach} 0 0 1 ${fmt(x)} ${fmt(y)}`;
+      return `M${fmt(x0 + reach)} ${fmt(y0)}H${fmt(x1 - reach)}${arc(x1, y0 + reach)}V${fmt(y1 - reach)}${arc(x1 - reach, y1)}H${fmt(x0 + reach)}${arc(x0, y1 - reach)}V${fmt(y0 + reach)}${arc(x0 + reach, y0)}z`;
+    })
+    .join("");
+}
+
 const tri = (t: number, ...css: string[]) => css.map((c) => [t, c] as Frame);
 
 function render(ctx: GameContext): GameOutput {
@@ -570,134 +610,135 @@ function render(ctx: GameContext): GameOutput {
   const red = light ? "#cf222e" : theme.name === "github-dark" ? "#ff3b3b" : "#ff4d6d";
   const glow = glowAttr(theme);
   // A filter over hundreds of animated sprites renders as a black patch in Chromium, so sprites get a faint outline instead.
-  const halo = (color: string) => (theme.glow > 0 ? ` stroke="${color}" stroke-opacity=".3" stroke-width="${theme.glow > 2 ? 2.6 : 1.8}" stroke-linejoin="round"` : "");
+  // It is baked into the sprite as a plain fill: stroking hundreds of outlines every frame costs several times more.
+  const haloReach = theme.glow > 2 ? 1.3 : 0.9;
+  const sprite = (id: string, rows: string[], scale: number) =>
+    `<g id="${id}">${theme.glow > 0 ? `<path d="${haloPath(rows, scale, haloReach)}" fill-opacity=".3"/>` : ""}<path d="${bitmapPath(rows, scale)}"/></g>`;
   const ink = theme.ink;
-  const delay = (t: number) => `style="--d:${(-(duration - at(t))).toFixed(3)}s"`;
   const empty = sim.kills.length === 0;
 
   const defs: string[] = [];
   const names = ["o", "c", "s"];
   [OCTOPUS, CRAB, SQUID].forEach((frames, i) => {
-    frames.forEach((rows, f) => defs.push(`<path id="${names[i]}${f}" d="${bitmapPath(rows, [SPRITE_SCALE[0], SPRITE_SCALE[2], SPRITE_SCALE[3]][i])}"/>`));
+    frames.forEach((rows, f) => defs.push(sprite(`${names[i]}${f}`, rows, [SPRITE_SCALE[0], SPRITE_SCALE[2], SPRITE_SCALE[3]][i])));
   });
-  defs.push(`<path id="bl" d="${bitmapPath(BLAST, BLAST_SCALE)}"/>`, `<path id="sp" d="${bitmapPath(SPLAT)}"/>`);
+  defs.push(`<path id="bl" d="${bitmapPath(BLAST, BLAST_SCALE)}"/>`, sprite("bh", BLAST, BLAST_SCALE), `<path id="sp" d="${bitmapPath(SPLAT)}"/>`);
   defs.push(`<path id="uf" d="${bitmapPath(UFO, UFO_SCALE)}"/>`, `<path id="cn" d="${bitmapPath(CANNON, CANNON_SCALE)}"/>`);
   for (let i = 0; i < 4; i++) defs.push(`<path id="bm${i}" d="${bitmapPath(bombRows(i))}"/>`);
 
   const parts: string[] = [];
   for (const cell of allCells(grid)) parts.push(cellRect(layout, cell, theme.empty));
 
-  // Formation: one stepped translate, with the leg frames flipping on the same beats.
-  const marchFrames: Frame[] = [[0, "transform:translate(0px,0px)"]];
-  const legA: Frame[] = [[0, "opacity:1"]];
-  const legB: Frame[] = [[0, "opacity:0"]];
+  // The formation is two layers, one per leg pose, that step together and swap visibility on every beat; a
+  // hidden layer costs nothing to paint. The sprites are static and read a kill counter from their group
+  // instead: a changed inherited value restyles every descendant, so the counters sit on small groups.
   const lastKill = sim.kills.length ? sim.kills[sim.kills.length - 1].t : 0;
-  sim.march.times.forEach((t, i) => {
-    if (t > lastKill + 0.01) return;
-    const T = at(t);
-    const showA = (i + 1) % 2 === 0;
-    marchFrames.push([T, marchFrames[marchFrames.length - 1][1]], [T, translate(sim.march.offsets[i], 0)]);
-    legA.push([T, `opacity:${showA ? 0 : 1}`], [T, `opacity:${showA ? 1 : 0}`]);
-    legB.push([T, `opacity:${showA ? 1 : 0}`], [T, `opacity:${showA ? 0 : 1}`]);
-  });
-  marchFrames.push([at(lastKill) + 0.05, marchFrames[marchFrames.length - 1][1]], [at(lastKill) + 0.05, "transform:translate(0px,0px)"]);
-  legA.push([at(lastKill) + 0.05, "opacity:1"]);
-  legB.push([at(lastKill) + 0.05, "opacity:0"]);
-  const marchClass = tl.track(marchFrames);
-  const legAClass = tl.track(legA);
-  const legBClass = tl.track(legB);
+  const beats = sim.march.times
+    .map((t, i) => ({ t: at(t), raw: t, off: sim.march.offsets[i], legs: (i + 1) % 2 === 0 ? 1 : 0 }))
+    .filter((b) => b.raw <= lastKill + 0.01);
+  const settle = at(lastKill) + 0.05;
+  const layerFrames = (pose: number): Frame[] => {
+    let off = 0;
+    let legs = 1;
+    const look = (opacity = 1) => `opacity:${opacity};${translate(off, 0)};visibility:${legs === 1 - pose ? "visible" : "hidden"}`;
+    const frames: Frame[] = [[0, look()]];
+    for (const b of beats) {
+      frames.push([b.t, look()]);
+      ({ off, legs } = b);
+      frames.push([b.t, look()]);
+    }
+    frames.push([settle, look()]);
+    off = 0;
+    legs = 1;
+    frames.push([settle, look()], [back, look()], [back, look(0)], [back + PACE.restore, look()]);
+    return frames;
+  };
 
-  const invaders: string[] = [];
-  const blasts: string[] = [];
-  const blastKeys = tl.keyframes([[0, "opacity:1"], [0.26, "opacity:1"], [0.261, "opacity:0"]]);
-  for (const kill of sim.kills) {
-    const { cell } = kill;
-    const kind = species(cell);
-    const id = SPRITE_ID[kind];
-    const x = layout.left + cell.x * layout.pitch;
-    const y = spriteTop(layout, cell);
-    const T = at(kill.t);
-    const cls = tl.track([
-      [0, "opacity:1"],
-      [T, "opacity:1"],
-      [T + 0.001, "opacity:0"],
-      [back, "opacity:0"],
-      [back + PACE.restore, "opacity:1"],
-    ]);
-    invaders.push(
-      `<g class="${cls}" fill="${spriteColor(theme, cell)}"${halo(spriteColor(theme, cell))}><use class="${legAClass}" href="#${id}0" x="${fmt(x)}" y="${fmt(y)}"/><use class="${legBClass}" href="#${id}1" x="${fmt(x)}" y="${fmt(y)}"/></g>`,
-    );
-    const cx = columnX(layout, cell.x) + offsetAt(sim.march, kill.t);
-    blasts.push(`<use class="bx" href="#bl" x="${fmt(cx - 6.5 * BLAST_SCALE)}" y="${fmt(y + spriteHeight(cell) / 2 - 3.5 * BLAST_SCALE)}" ${delay(kill.t)}/>`);
+  const blastPlays: Play[] = [];
+  const layers: string[][] = [[], []];
+  for (let first = 0; first < sim.kills.length; first += KILL_GROUP) {
+    const members = sim.kills.slice(first, first + KILL_GROUP);
+    const counter: Frame[] = [[0, "--n:0"]];
+    members.forEach((kill, i) => counter.push([at(kill.t), `--n:${i}`], [at(kill.t), `--n:${i + 1}`]));
+    counter.push([back, `--n:${members.length}`], [back, "--n:0"]);
+    const keys = tl.keyframes(counter);
+    for (const pose of [0, 1]) {
+      const sprites = members.map(({ cell }, i) => {
+        const x = layout.left + cell.x * layout.pitch;
+        const y = spriteTop(layout, cell);
+        return `<use class="k" style="--i:${i + 1}" href="#${SPRITE_ID[species(cell)]}${pose}" x="${fmt(x)}" y="${fmt(y)}" fill="${spriteColor(theme, cell)}"/>`;
+      });
+      layers[pose].push(`<g class="${tl.useKeyframes(keys, 0)}" style="--n:0">${sprites.join("")}</g>`);
+    }
+    for (const kill of members) {
+      const { cell } = kill;
+      const cx = columnX(layout, cell.x) + offsetAt(sim.march, kill.t);
+      const T = at(kill.t);
+      const spot = translate(cx - 6.5 * BLAST_SCALE, spriteTop(layout, cell) + spriteHeight(cell) / 2 - 3.5 * BLAST_SCALE);
+      blastPlays.push({ frames: [[T, `opacity:1;${spot}`], [T + 0.26, `opacity:1;${spot}`], [T + 0.261, `opacity:0;${spot}`]] });
+    }
   }
-  parts.push(`<g class="${marchClass}">${invaders.join("")}</g>`);
-  parts.push(`<g fill="${ink}"${halo(ink)}>${blasts.join("")}</g>`);
+  if (sim.kills.length) layers.forEach((markup, pose) => parts.push(`<g class="${tl.track(layerFrames(pose))}">${markup.join("")}</g>`));
+  parts.push(`<g fill="${ink}">${pooled(tl, blastPlays).map((c) => `<use class="${c}" href="#bh"/>`).join("")}</g>`);
 
-  // Bunkers: untouched tiles are one path, each chip event is its own group that vanishes when hit.
+  // Bunkers: untouched tiles are one path each, and each chip event is its own group that vanishes when hit.
+  // A glow filter blurs the bounding box of what it is on, so one path per bunker keeps that to the bunker itself.
   const gone = new Set<string>();
   for (const chip of sim.chips) for (const [b, c, r] of chip.tiles) gone.add(`${b}:${c}:${r}`);
-  const bunkerStatic: string[] = [];
   field.bunkerX.forEach((bx, b) => {
     const rows = BUNKER.map((row, r) => [...row].map((ch, c) => (ch === "#" && !gone.has(`${b}:${c}:${r}`) ? "#" : ".")).join(""));
-    bunkerStatic.push(bitmapPath(rows, BUNKER_TILE, bx, field.bunkerTop));
+    parts.push(`<path d="${bitmapPath(rows, BUNKER_TILE, bx, field.bunkerTop)}" fill="${green}"${glow}/>`);
   });
-  parts.push(`<path d="${bunkerStatic.join("")}" fill="${green}"${glow}/>`);
-  for (const chip of sim.chips) {
+  const chips = [...sim.chips].sort((p, q) => p.t - q.t);
+  const chipFrames: Frame[] = [[0, "opacity:1;--c:0"]];
+  chips.forEach((chip, i) => chipFrames.push([at(chip.t), `opacity:1;--c:${i}`], [at(chip.t), `opacity:1;--c:${i + 1}`]));
+  chipFrames.push([back, `opacity:1;--c:${chips.length}`], [back, "opacity:0;--c:0"], [back + PACE.restore, "opacity:1;--c:0"]);
+  const chipPaths = chips.map((chip, i) => {
     const d = chip.tiles
       .map(([b, c, r]) => bitmapPath(["#"], BUNKER_TILE, field.bunkerX[b] + c * BUNKER_TILE, field.bunkerTop + r * BUNKER_TILE))
       .join("");
-    const T = at(chip.t);
-    const cls = tl.track([
-      [0, "opacity:1"],
-      [T, "opacity:1"],
-      [T + 0.001, "opacity:0"],
-      [back, "opacity:0"],
-      [back + PACE.restore, "opacity:1"],
-    ]);
-    parts.push(`<path class="${cls}" d="${d}" fill="${green}"/>`);
-  }
+    return `<path class="chip" style="--i:${i + 1}" d="${d}"/>`;
+  });
+  if (chips.length) parts.push(`<g class="${tl.track(chipFrames)}" style="--c:0" fill="${green}">${chipPaths.join("")}</g>`);
 
   parts.push(`<rect x="4" y="${field.groundY}" width="${field.width - 8}" height="2" fill="${green}" opacity=".75"/>`);
 
-  // Shots share a rise animation per target height; the delay var lines each one up with its fire time.
-  const shotKeys = new Map<number, string>();
-  const shotCss: string[] = [];
-  const shotEls: string[] = [];
-  for (const s of sim.shots) {
-    const travel = Math.round(field.cannonY - SHOT_LEAD - s.y);
-    let name = shotKeys.get(travel);
-    if (!name) {
-      const flight = travel / SHOT_SPEED;
-      name = tl.keyframes([
-        [0, "opacity:1;transform:translateY(0px)"],
-        [flight, `opacity:1;transform:translateY(${-travel}px)`],
-        [flight + 0.001, `opacity:0;transform:translateY(${-travel}px)`],
-      ]);
-      shotKeys.set(travel, name);
-      shotCss.push(`.sh${shotKeys.size}{animation:${name} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`);
-    }
-    const idx = [...shotKeys.keys()].indexOf(travel) + 1;
-    shotEls.push(`<rect class="sh${idx}" x="${fmt(s.x - 1)}" y="${field.cannonY - SHOT_LEAD}" width="2" height="${SHOT_H}" stroke="${green}" stroke-opacity=".55" stroke-width="2" ${delay(s.fire)}/>`);
-  }
+  const shotPlays: Play[] = sim.shots.map((s) => {
+    const top = field.cannonY - SHOT_LEAD;
+    const rise = Math.round(top - s.y);
+    const T = at(s.fire);
+    const end = at(s.fire + rise / SHOT_SPEED);
+    return {
+      frames: [
+        [T, `opacity:1;${translate(s.x - 1, top)}`],
+        [end, `opacity:1;${translate(s.x - 1, top - rise)}`],
+        [end + 0.001, `opacity:0;${translate(s.x - 1, top - rise)}`],
+      ],
+    };
+  });
+  const shotEls = pooled(tl, shotPlays).map(
+    (c) => `<rect class="${c}" width="2" height="${SHOT_H}" stroke="${green}" stroke-opacity=".55" stroke-width="2"/>`,
+  );
   parts.push(`<g fill="${ink}">${shotEls.join("")}</g>`);
 
   // Bombs: falling zigzag, then a splat where they stop.
-  const splatKeys = tl.keyframes([[0, "opacity:1"], [0.2, "opacity:1"], [0.201, "opacity:0"]]);
-  const bombEls: string[] = [];
-  const splatEls: string[] = [];
+  const bombPlays: Play[] = [];
+  const splatPlays: Play[] = [];
   for (const b of sim.bombs) {
     const t0 = at(b.t);
     const t1 = at(b.end);
-    const cls = tl.track([
-      [0, `opacity:0;${translate(b.x - 1.5, b.y0)}`],
-      [t0, `opacity:0;${translate(b.x - 1.5, b.y0)}`],
-      [t0, `opacity:1;${translate(b.x - 1.5, b.y0)}`],
-      [t1, `opacity:1;${translate(b.x - 1.5, b.y1)}`],
-      [t1, `opacity:0;${translate(b.x - 1.5, b.y1)}`],
-    ]);
-    bombEls.push(`<g class="${cls}">${[0, 1, 2, 3].map((i) => `<use class="bf${i}" href="#bm${i}"/>`).join("")}</g>`);
-    splatEls.push(`<use class="sx" href="#sp" x="${fmt(b.x - 3)}" y="${fmt(b.y1 + 2)}" ${delay(b.end)}/>`);
+    bombPlays.push({
+      frames: [
+        [t0, `opacity:1;${translate(b.x - 1.5, b.y0)}`],
+        [t1, `opacity:1;${translate(b.x - 1.5, b.y1)}`],
+        [t1, `opacity:0;${translate(b.x - 1.5, b.y1)}`],
+      ],
+    });
+    const spot = translate(b.x - 3, b.y1 + 2);
+    splatPlays.push({ frames: [[t1, `opacity:1;${spot}`], [t1 + 0.2, `opacity:1;${spot}`], [t1 + 0.201, `opacity:0;${spot}`]] });
   }
+  const bombEls = pooled(tl, bombPlays).map((c) => `<g class="${c}">${[0, 1, 2, 3].map((i) => `<use class="bf${i}" href="#bm${i}"/>`).join("")}</g>`);
+  const splatEls = pooled(tl, splatPlays).map((c) => `<use class="${c}" href="#sp"/>`);
   parts.push(`<g fill="${ink}">${bombEls.join("")}${splatEls.join("")}</g>`);
 
   // Mystery ship.
@@ -720,7 +761,9 @@ function render(ctx: GameContext): GameOutput {
       const h = at(u.hit);
       const label = pixelText(String(u.score), 2);
       const lx = Math.min(Math.max(u.hitX - label.width / 2, 2), field.width - label.width - 2);
-      ufoEls.push(`<use class="bx" href="#bl" x="${fmt(u.hitX - 6.5 * BLAST_SCALE)}" y="${fmt(field.ufoY + 3.5 * UFO_SCALE - 3.5 * BLAST_SCALE)}" fill="${red}" ${delay(u.hit)}/>`);
+      const spot = translate(u.hitX - 6.5 * BLAST_SCALE, field.ufoY + 3.5 * UFO_SCALE - 3.5 * BLAST_SCALE);
+      const blast = tl.track([[0, `opacity:0;${spot}`], [h, `opacity:0;${spot}`], [h, `opacity:1;${spot}`], [h + 0.26, `opacity:1;${spot}`], [h + 0.261, `opacity:0;${spot}`]]);
+      ufoEls.push(`<use class="${blast}" href="#bl" fill="${red}"/>`);
       const cls = tl.track([[0, "opacity:0"], [h + 0.2, "opacity:0"], [h + 0.2, "opacity:1"], [h + 1.2, "opacity:1"], [h + 1.2, "opacity:0"]]);
       ufoEls.push(`<path class="${cls}" d="${label.d}" transform="translate(${fmt(lx)} ${field.ufoY - 3})" fill="${red}"/>`);
     }
@@ -751,11 +794,9 @@ function render(ctx: GameContext): GameOutput {
   parts.push(hud(tl, grid, { theme, title: "SPACE INVADERS", clears, resetAt: back, width: field.width }));
 
   const cycle = 0.32;
-  const dur = (n: number) => fmt(n);
   const css = [
-    `.bx{animation:${blastKeys} ${dur(duration)}s linear infinite;animation-delay:var(--d)}`,
-    `.sx{animation:${splatKeys} ${dur(duration)}s linear infinite;animation-delay:var(--d)}`,
-    ...shotCss,
+    ".k{opacity:clamp(0,calc(var(--i) - var(--n)),1)}",
+    ".chip{opacity:clamp(0,calc(var(--i) - var(--c)),1)}",
     "@keyframes bfk{0%{opacity:1}25%{opacity:0}100%{opacity:0}}",
     ...[0, 1, 2, 3].map((i) => `.bf${i}{animation:bfk ${cycle}s steps(1,end) infinite;animation-delay:-${fmt(cycle - i * 0.08)}s}`),
     "path{shape-rendering:crispEdges}",

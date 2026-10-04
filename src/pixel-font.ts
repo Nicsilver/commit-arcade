@@ -86,8 +86,22 @@ export function pixelText(text: string, scale = 2): PixelText {
  * when the image is scaled.
  */
 export function bitmapPath(rows: string[], scale = 1, ox = 0, oy = 0): string {
-  const open = new Map<string, { x: number; end: number; y: number; h: number }>();
-  const done: { x: number; end: number; y: number; h: number }[] = [];
+  return bitmapRects(rows)
+    .map((r) => `M${fmt(ox + r.x * scale)} ${fmt(oy + r.y * scale)}h${fmt((r.end - r.x) * scale)}v${fmt(r.h * scale)}h${fmt(-(r.end - r.x) * scale)}z`)
+    .join("");
+}
+
+export interface BitmapRect {
+  x: number;
+  end: number;
+  y: number;
+  h: number;
+}
+
+/** The merged rectangles bitmapPath draws, in pixel units. */
+export function bitmapRects(rows: string[]): BitmapRect[] {
+  const open = new Map<string, BitmapRect>();
+  const done: BitmapRect[] = [];
   rows.forEach((row, y) => {
     const seen = new Set<string>();
     let x = 0;
@@ -113,7 +127,5 @@ export function bitmapPath(rows: string[], scale = 1, ox = 0, oy = 0): string {
     }
   });
   done.push(...open.values());
-  return done
-    .map((r) => `M${fmt(ox + r.x * scale)} ${fmt(oy + r.y * scale)}h${fmt((r.end - r.x) * scale)}v${fmt(r.h * scale)}h${fmt(-(r.end - r.x) * scale)}z`)
-    .join("");
+  return done;
 }
