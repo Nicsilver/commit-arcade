@@ -10,6 +10,9 @@ import { FLAME, simulateBomberman, type PowerKind } from "./bomberman-sim.ts";
 
 const OUTLINE = "#1b1f3b";
 const TARGET_PLAY = 58;
+const DEBRIS = "M-1-7h2v2h-2zM5-5h2v2h-2zM6-1h2v2h-2zM4 4h2v2h-2zM-1 5h2v2h-2zM-6 4h2v2h-2zM-8-1h2v2h-2zM-6-5h2v2h-2z";
+/** Centre of the bomb artwork's bounding box, which the scale-in grows from. */
+const BOMB_CENTER = [0.1, -1.6];
 
 interface Palette {
   flameOuter: string;
@@ -20,6 +23,37 @@ interface Palette {
   bombRim: string;
   fuse: string;
   spark: string;
+}
+
+/**
+ * One-shot effects share a few elements instead of one each: every slot plays
+ * its events back to back on a single keyframe track, parked invisible in
+ * between, so the browser has far fewer infinite animations to service.
+ * Events must be added in start order; a slot is only reused for the same key.
+ */
+class Pool {
+  private readonly slots: { key: string; end: number; layers: Frame[][] }[] = [];
+
+  private readonly idle: string[];
+
+  constructor(idle: string[]) {
+    this.idle = idle;
+  }
+
+  add(key: string, start: number, end: number, layers: Frame[][]): void {
+    let slot = this.slots.find((s) => s.key === key && s.end <= start);
+    if (!slot) {
+      slot = { key, end: 0, layers: this.idle.map((css): Frame[] => [[0, css]]) };
+      this.slots.push(slot);
+    }
+    const open = slot;
+    layers.forEach((frames, i) => open.layers[i].push([start, this.idle[i]], ...frames, [end, this.idle[i]]));
+    slot.end = end;
+  }
+
+  markup(tl: Timeline, draw: (key: string, classes: string[]) => string): string {
+    return this.slots.map((s) => draw(s.key, s.layers.map((frames) => tl.track(frames)))).join("");
+  }
 }
 
 function luminance(hex: string): number {
@@ -60,76 +94,6 @@ function render(ctx: GameContext): GameOutput {
     const mortar = luminance(fill) < 0.3 ? mix(fill, "#ffffff", 0.22) : mix(fill, "#000000", 0.32);
     defs.push(`<path id="bk${level}" d="M0 4H12M0 8H12M6 0V4M3 4V8M9 4V8M6 8V12" stroke="${mortar}" stroke-width="1" fill="none"/>`);
   }
-  defs.push(`<path id="deb" d="M-1-7h2v2h-2zM5-5h2v2h-2zM6-1h2v2h-2zM4 4h2v2h-2zM-1 5h2v2h-2zM-6 4h2v2h-2zM-8-1h2v2h-2zM-6-5h2v2h-2z"/>`);
-
-  // Shared one-shot effects: every instance replays the same keyframes with its own lag.
-  const burstKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.45) rotate(0deg)"],
-    [0.4, "opacity:0;transform:scale(1.9) rotate(40deg)"],
-    [duration, "opacity:0;transform:scale(1.9) rotate(40deg)"],
-  ]);
-  const flashKf = tl.keyframes([
-    [0, "opacity:.95;transform:scale(.3)"],
-    [0.22, "opacity:0;transform:scale(1.5)"],
-    [duration, "opacity:0;transform:scale(1.5)"],
-  ]);
-  const ringKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.2)"],
-    [0.55, "opacity:0;transform:scale(2.6)"],
-    [duration, "opacity:0;transform:scale(2.6)"],
-  ]);
-  const bigRingKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.2)"],
-    [0.8, "opacity:0;transform:scale(4.2)"],
-    [duration, "opacity:0;transform:scale(4.2)"],
-  ]);
-  const popKf = tl.keyframes([
-    [0, "opacity:0;transform:translateY(0px)"],
-    [0.08, "opacity:1;transform:translateY(-2px)"],
-    [0.9, "opacity:1;transform:translateY(-9px)"],
-    [1.2, "opacity:0;transform:translateY(-11px)"],
-    [duration, "opacity:0;transform:translateY(-11px)"],
-  ]);
-  const flame = FLAME * dt;
-  const flameKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(1.18)"],
-    [dt, "opacity:1;transform:scale(1)"],
-    [flame - dt * 0.8, "opacity:1;transform:scale(1)"],
-    [flame, "opacity:0;transform:scale(.92)"],
-    [duration, "opacity:0;transform:scale(.92)"],
-  ]);
-  const flameMidKf = tl.keyframes([
-    [0, "opacity:1"],
-    [dt * 2.5, "opacity:1"],
-    [flame - dt * 0.4, "opacity:0"],
-    [duration, "opacity:0"],
-  ]);
-  const flameCoreKf = tl.keyframes([
-    [0, "opacity:1"],
-    [dt * 0.9, "opacity:1"],
-    [dt * 1.3, "opacity:0"],
-    [dt * 2, "opacity:0"],
-    [dt * 2, "opacity:.9"],
-    [dt * 2.6, "opacity:0"],
-    [duration, "opacity:0"],
-  ]);
-  const bombLife = new Map<number, string>();
-  const bombKf = (life: number): string => {
-    const key = Math.round(life * 1000);
-    let name = bombLife.get(key);
-    if (!name) {
-      name = tl.keyframes([
-        [0, "opacity:0;transform:scale(.4)"],
-        [0.001, "opacity:1;transform:scale(.55)"],
-        [0.12, "opacity:1;transform:scale(1)"],
-        [life, "opacity:1;transform:scale(1)"],
-        [life + 0.001, "opacity:0;transform:scale(1)"],
-        [duration, "opacity:0;transform:scale(1)"],
-      ]);
-      bombLife.set(key, name);
-    }
-    return name;
-  };
 
   // Arena: faint floor under the lane so Bomberman visibly walks somewhere.
   const floor: string[] = [];
@@ -142,7 +106,12 @@ function render(ctx: GameContext): GameOutput {
     const [cx, cy] = cellCenter(layout, x, y);
     floor.push(`<rect x="${fmt(cx - 6)}" y="${fmt(cy - 6)}" width="12" height="12" rx="2.4" fill="${theme.empty}" opacity=".5"/>`);
   }
+  const glow = (inner: string) => (theme.glow > 0 ? `<g${glowAttr(theme)}>${inner}</g>` : inner);
+
+  // Blocks: unbroken ones are static; the rest share one fading group per break
+  // tick, and a pooled copy plays the crumble.
   const blocks: string[] = [];
+  const doomed = new Map<number, string[]>();
   for (const column of grid.cells) {
     for (const cell of column) {
       if (!cell) continue;
@@ -150,95 +119,187 @@ function render(ctx: GameContext): GameOutput {
       if (cell.level === 0) continue;
       const [cx, cy] = cellCenter(layout, cell.x, cell.y);
       const fill = levelColor(theme, cell);
-      const te = cellSet.get(cell);
       const body = `<rect x="${fmt(cx - 6)}" y="${fmt(cy - 6)}" width="12" height="12" rx="${layout.radius}" fill="${fill}"/><use href="#bk${cell.level}" x="${fmt(cx - 6)}" y="${fmt(cy - 6)}"/>`;
+      const te = cellSet.get(cell);
       if (te === undefined) {
-        blocks.push(`<g>${body}</g>`);
+        blocks.push(body);
         continue;
       }
-      const rest = "opacity:1;transform:scale(1)";
-      const cls = tl.track([
-        [0, rest],
-        [te, rest],
-        [te + 0.03, "opacity:1;transform:scale(1.22)"],
-        [te + 0.15, "opacity:0;transform:scale(.4)"],
-        [restore, "opacity:0;transform:scale(1)"],
-        [fadeEnd, rest],
-      ]);
-      blocks.push(`<g class="c ${cls}">${body}</g>`);
+      const group = doomed.get(te);
+      if (group) group.push(body);
+      else doomed.set(te, [body]);
     }
   }
+  for (const [te, bodies] of [...doomed].sort((a, b) => a[0] - b[0])) {
+    const cls = tl.track([
+      [0, "opacity:1"],
+      [te, "opacity:1"],
+      [te, "opacity:0"],
+      [restore, "opacity:0"],
+      [fadeEnd, "opacity:1"],
+    ]);
+    blocks.push(`<g class="${cls}">${bodies.join("")}</g>`);
+  }
 
-  // Block crumble: debris scatters outward from the block, plus a white flash.
-  const debris: string[] = [];
-  for (const b of sim.breaks) {
+  const byTick = [...sim.breaks].sort((a, b) => a.tick - b.tick);
+  const crumbles = new Pool(["opacity:0;transform:translate(0px,0px) scale(1)"]);
+  const debris = new Pool([`fill:${spriteColor(theme, { level: 1 })};opacity:0;transform:translate(0px,0px) scale(1.9) rotate(40deg)`]);
+  const flashes = new Pool(["opacity:0;transform:translate(0px,0px) scale(1.5)"]);
+  for (const b of byTick) {
     const [cx, cy] = px(b.idx);
     const t = at(b.tick);
+    const rest = "opacity:1;" + translate(cx, cy, "scale(1)");
+    crumbles.add(String(b.cell.level), t, t + 0.15, [
+      [
+        [t, rest],
+        [t + 0.03, "opacity:1;" + translate(cx, cy, "scale(1.22)")],
+        [t + 0.15, "opacity:0;" + translate(cx, cy, "scale(.4)")],
+      ],
+    ]);
     const color = spriteColor(theme, b.cell);
-    debris.push(
-      `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><use href="#deb" fill="${color}" class="${tl.useKeyframes(burstKf, t)}"/><circle r="7" fill="#fff" class="${tl.useKeyframes(flashKf, t)}"/></g>`,
-    );
+    debris.add("", t, t + 0.4, [
+      [
+        [t, `fill:${color};opacity:1;` + translate(cx, cy, "scale(.45) rotate(0deg)")],
+        [t + 0.4, `fill:${color};opacity:0;` + translate(cx, cy, "scale(1.9) rotate(40deg)")],
+      ],
+    ]);
+    flashes.add("", t, t + 0.22, [
+      [
+        [t, "opacity:.95;" + translate(cx, cy, "scale(.3)")],
+        [t + 0.22, "opacity:0;" + translate(cx, cy, "scale(1.5)")],
+      ],
+    ]);
   }
+  blocks.push(
+    crumbles.markup(tl, (level, [cls]) => {
+      const fill = theme.levels[Number(level) - 1];
+      return `<g class="${cls}"><rect x="-6" y="-6" width="12" height="12" rx="${layout.radius}" fill="${fill}"/><use href="#bk${level}" x="-6" y="-6"/></g>`;
+    }),
+  );
+  const debrisMarkup = [
+    debris.markup(tl, (_, [cls]) => `<path d="${DEBRIS}" class="${cls}"/>`),
+    flashes.markup(tl, (_, [cls]) => `<circle r="7" fill="#fff" class="${cls}"/>`),
+  ].join("");
 
   // Power-ups.
   const items: string[] = [];
-  const popups: string[] = [];
-  const itemRings: string[] = [];
+  const popups = new Pool(["opacity:0;transform:translate(0px,0px)"]);
+  const itemRings = new Pool(["opacity:0;transform:translate(0px,0px) scale(2.6)"]);
+  const taken = [...sim.items].filter((i) => i.taken !== null).sort((a, b) => a.taken! - b.taken!);
   for (const item of sim.items) {
     const [cx, cy] = px(item.idx);
     const born = at(item.revealed);
-    const taken = item.taken === null ? restore : at(item.taken);
+    const gone = item.taken === null ? restore : at(item.taken);
     const cls = tl.track([
       [0, "opacity:0;transform:scale(.3)"],
       [born, "opacity:0;transform:scale(.3)"],
       [born + 0.12, "opacity:1;transform:scale(1.25)"],
       [born + 0.3, "opacity:1;transform:scale(1)"],
-      [taken, "opacity:1;transform:scale(1)"],
-      [taken + 0.18, "opacity:0;transform:scale(1.8)"],
+      [gone, "opacity:1;transform:scale(1)"],
+      [gone + 0.18, "opacity:0;transform:scale(1.8)"],
       [duration, "opacity:0;transform:scale(1.8)"],
     ]);
-    items.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="c ${cls}"><g class="bob">${powerIcon(item.kind, pal)}</g></g></g>`);
-    if (item.taken !== null) {
-      const label = pixelText(item.kind === "fire" ? "FIRE UP" : "BOMB UP", 1);
-      const lx = Math.min(Math.max(cx - label.width / 2, 12), layout.width - 12 - label.width);
-      const ly = cy < 60 ? cy + 12 : cy - 24;
-      popups.push(
-        `<g transform="translate(${fmt(lx)} ${fmt(ly)})"><path d="${label.d}" fill="#ffffff" stroke="${OUTLINE}" stroke-width="2" stroke-linejoin="round" paint-order="stroke" class="${tl.useKeyframes(popKf, taken)}"/></g>`,
-      );
-      itemRings.push(
-        `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><circle r="8" fill="none" stroke="${item.kind === "fire" ? pal.flameMid : theme.accent}" stroke-width="2" class="${tl.useKeyframes(ringKf, taken)}"/></g>`,
-      );
-    }
+    items.push(glow(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="c ${cls}"><g class="bob">${powerIcon(item.kind, pal)}</g></g></g>`));
   }
+  for (const item of taken) {
+    const [cx, cy] = px(item.idx);
+    const t = at(item.taken!);
+    const label = pixelText(item.kind === "fire" ? "FIRE UP" : "BOMB UP", 1);
+    const lx = Math.min(Math.max(cx - label.width / 2, 12), layout.width - 12 - label.width);
+    const ly = cy < 60 ? cy + 12 : cy - 24;
+    popups.add(label.d, t, t + 1.2, [
+      [
+        [t, "opacity:0;" + translate(lx, ly)],
+        [t + 0.08, "opacity:1;" + translate(lx, ly - 2)],
+        [t + 0.9, "opacity:1;" + translate(lx, ly - 9)],
+        [t + 1.2, "opacity:0;" + translate(lx, ly - 11)],
+      ],
+    ]);
+    itemRings.add(item.kind === "fire" ? pal.flameMid : theme.accent, t, t + 0.55, [
+      [
+        [t, "opacity:1;" + translate(cx, cy, "scale(.2)")],
+        [t + 0.55, "opacity:0;" + translate(cx, cy, "scale(2.6)")],
+      ],
+    ]);
+  }
+  const popupMarkup = popups.markup(
+    tl,
+    (d, [cls]) => `<path d="${d}" fill="#ffffff" stroke="${OUTLINE}" stroke-width="2" stroke-linejoin="round" paint-order="stroke" class="${cls}"/>`,
+  );
 
-  // Bombs.
-  const bombs: string[] = [];
-  for (const p of sim.plants) {
+  // Bombs: scaling about the artwork's centre is baked into the translation so
+  // a moving slot can still pop in around the bomb itself.
+  const bombs = new Pool(["opacity:0;transform:translate(0px,0px) scale(1)"]);
+  const bombCss = (cx: number, cy: number, scale: number, opacity: number) =>
+    `opacity:${opacity};` + translate(cx + BOMB_CENTER[0] * (1 - scale), cy + BOMB_CENTER[1] * (1 - scale), `scale(${scale})`);
+  for (const p of [...sim.plants].sort((a, b) => a.tick - b.tick)) {
     const [cx, cy] = px(p.idx);
+    const t = at(p.tick);
     const life = (p.explode - p.tick) * dt;
-    const cls = tl.useKeyframes(bombKf(life), at(p.tick));
-    bombs.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="c ${cls}"><g class="pulse">${bombShape(pal)}</g></g></g>`);
+    bombs.add("", t, t + life + 0.001, [
+      [
+        [t, bombCss(cx, cy, 0.4, 0)],
+        [t + 0.001, bombCss(cx, cy, 0.55, 1)],
+        [t + 0.12, bombCss(cx, cy, 1, 1)],
+        [t + life, bombCss(cx, cy, 1, 1)],
+        [t + life + 0.001, bombCss(cx, cy, 1, 0)],
+      ],
+    ]);
   }
+  const bombMarkup = bombs.markup(tl, (_, [cls]) => `<g class="${cls}"${glowAttr(theme)}><g class="pulse">${bombShape(pal)}</g></g>`);
 
-  // Blasts.
+  // Blasts: the cross shape depends on the arm lengths, so slots are per shape.
+  const flame = FLAME * dt;
+  const blasts = new Pool([
+    "opacity:0;transform:translate(0px,0px) scale(.92)",
+    "opacity:0",
+    "opacity:0",
+  ]);
   const lastBlastTick = Math.max(...sim.blasts.map((b) => b.tick), 0);
-  const blasts: string[] = [];
-  const bigRings: string[] = [];
-  for (const b of sim.blasts) {
+  const bigRings = new Pool(["opacity:0;transform:translate(0px,0px) scale(4.2)"]);
+  for (const b of [...sim.blasts].sort((a, c) => a.tick - c.tick)) {
     const [cx, cy] = px(b.idx);
     const t = at(b.tick);
-    const outer = crossShape(b.arms, 6, layout.pitch, pal.flameOuter, pal.flameStroke === "none" ? "" : ` stroke="${pal.flameStroke}" stroke-width="1"`);
-    const mid = crossShape(b.arms, 3.8, layout.pitch, pal.flameMid, "");
-    const core = crossShape(b.arms, 1.7, layout.pitch, pal.flameCore, "");
-    blasts.push(
-      `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="${tl.useKeyframes(flameKf, t)}">${outer}<g class="${tl.useKeyframes(flameMidKf, t)}">${mid}</g><g class="${tl.useKeyframes(flameCoreKf, t)}">${core}</g></g></g>`,
-    );
+    blasts.add(b.arms.join(","), t, t + flame, [
+      [
+        [t, "opacity:1;" + translate(cx, cy, "scale(1.18)")],
+        [t + dt, "opacity:1;" + translate(cx, cy, "scale(1)")],
+        [t + flame - dt * 0.8, "opacity:1;" + translate(cx, cy, "scale(1)")],
+        [t + flame, "opacity:0;" + translate(cx, cy, "scale(.92)")],
+      ],
+      [
+        [t, "opacity:1"],
+        [t + dt * 2.5, "opacity:1"],
+        [t + flame - dt * 0.4, "opacity:0"],
+      ],
+      [
+        [t, "opacity:1"],
+        [t + dt * 0.9, "opacity:1"],
+        [t + dt * 1.3, "opacity:0"],
+        [t + dt * 2, "opacity:0"],
+        [t + dt * 2, "opacity:.9"],
+        [t + dt * 2.6, "opacity:0"],
+      ],
+    ]);
     if (b.tick === lastBlastTick) {
-      bigRings.push(
-        `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><circle r="9" fill="none" stroke="${theme.accent}" stroke-width="2.4" class="${tl.useKeyframes(bigRingKf, t)}"/></g>`,
-      );
+      bigRings.add("", t, t + 0.8, [
+        [
+          [t, "opacity:1;" + translate(cx, cy, "scale(.2)")],
+          [t + 0.8, "opacity:0;" + translate(cx, cy, "scale(4.2)")],
+        ],
+      ]);
     }
   }
+  const blastMarkup = blasts.markup(tl, (key, [flameCls, midCls, coreCls]) => {
+    const arms = key.split(",").map(Number) as [number, number, number, number];
+    const outer = crossShape(arms, 6, layout.pitch, pal.flameOuter, pal.flameStroke === "none" ? "" : ` stroke="${pal.flameStroke}" stroke-width="1"`);
+    const mid = crossShape(arms, 3.8, layout.pitch, pal.flameMid, "");
+    const core = crossShape(arms, 1.7, layout.pitch, pal.flameCore, "");
+    return `<g class="${flameCls}"${glowAttr(theme)}>${outer}<g class="${midCls}">${mid}</g><g class="${coreCls}">${core}</g></g>`;
+  });
+  const ringMarkup =
+    bigRings.markup(tl, (_, [cls]) => glow(`<circle r="9" fill="none" stroke="${theme.accent}" stroke-width="2.4" class="${cls}"/>`)) +
+    itemRings.markup(tl, (color, [cls]) => glow(`<circle r="8" fill="none" stroke="${color}" stroke-width="2" class="${cls}"/>`));
 
   // Bomberman.
   const start = px(0);
@@ -335,13 +396,13 @@ function render(ctx: GameContext): GameOutput {
     `<g>${floor.join("")}</g>`,
     `<g>${tiles.join("")}</g>`,
     `<g>${blocks.join("")}</g>`,
-    `<g${glowAttr(theme)}>${items.join("")}</g>`,
-    `<g${glowAttr(theme)}>${bombs.join("")}</g>`,
-    `<g${glowAttr(theme)}>${blasts.join("")}</g>`,
-    `<g>${debris.join("")}</g>`,
-    `<g${glowAttr(theme)}>${bigRings.join("")}${itemRings.join("")}</g>`,
+    items.join(""),
+    bombMarkup,
+    blastMarkup,
+    debrisMarkup,
+    ringMarkup,
     `<g class="${posCls}"><g class="${fadeCls}"><g class="${hopCls}"${glowAttr(theme)}>${sprite}</g></g></g>`,
-    popups.join(""),
+    popupMarkup,
     hudMarkup,
     endCard,
   ].join("\n");
