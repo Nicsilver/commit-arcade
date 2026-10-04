@@ -8,6 +8,7 @@ import { bitmapPath, pixelText } from "../src/pixel-font.ts";
 const W = 896;
 const H = 272;
 const R = 22;
+const BULB_COLORS = ["#ff4df0", "#f5b53d"];
 const SPECTRUM = ["#ff4d6d", "#ff7a3d", "#f5b53d", "#14b88a", "#2f8cff", "#7c5cff", "#ff4df0"];
 
 const CRAB = [
@@ -59,6 +60,10 @@ out.push(
     SPECTRUM.concat(SPECTRUM[0]).map((c, i) => `<stop offset="${fmt(i / SPECTRUM.length)}" stop-color="${c}"/>`).join("") +
     `<animateTransform attributeName="gradientTransform" type="translate" values="0 0;${W} 0" dur="6s" repeatCount="indefinite"/>` +
     `</linearGradient>` +
+    BULB_COLORS.map(
+      (c, i) =>
+        `<radialGradient id="halo${i}"><stop offset=".3" stop-color="${c}" stop-opacity=".6"/><stop offset=".6" stop-color="${c}" stop-opacity=".22"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></radialGradient>`,
+    ).join("") +
     `<filter id="glow" x="-20%" y="-40%" width="140%" height="180%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` +
     `</defs>`,
 );
@@ -79,10 +84,14 @@ const pulse = tl.keyframes([
   [0.6, "opacity:.18"],
   [4.8, "opacity:.18"],
 ]);
+// The halo is a gradient rather than the glow filter: a blur per bulb, redrawn as each one pulses, made the
+// banner as expensive to animate as a whole game.
 bulbs.forEach(([x, y], i) => {
-  const color = i % 2 ? "#f5b53d" : "#ff4df0";
   const cls = tl.useKeyframes(pulse, (i * 4.8) / bulbs.length * 3);
-  out.push(`<circle class="${cls}" cx="${fmt(x)}" cy="${fmt(y)}" r="3.6" fill="${color}" filter="url(#glow)"/>`);
+  out.push(
+    `<g class="${cls}"><circle cx="${fmt(x)}" cy="${fmt(y)}" r="11" fill="url(#halo${i % 2})"/>` +
+      `<circle cx="${fmt(x)}" cy="${fmt(y)}" r="3.6" fill="${BULB_COLORS[i % 2]}"/></g>`,
+  );
 });
 
 // Title with a hard drop shadow, then the moving spectrum fill on top.
