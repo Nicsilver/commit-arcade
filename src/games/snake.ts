@@ -228,6 +228,14 @@ const MIN_STEP = 0.04;
 /** Shortest game that still gets a second gear; below this the first one is already brisk. */
 const MIN_PLAY_FOR_SPEED_UP = 10;
 const EAT_HOLD = 0.15;
+/** Glow rings around the body as (reach in glow radii past the outline, opacity), widest first. */
+const HALO: [number, number][] = [
+  [1.6, 0.07],
+  [1.2, 0.08],
+  [0.8, 0.09],
+  [0.45, 0.1],
+  [0.15, 0.12],
+];
 const EAT_FADE = 0.3;
 
 interface Phase {
@@ -366,95 +374,179 @@ function render(ctx: GameContext): GameOutput {
   ]);
 
   const growth = sim.eats.filter((e) => e.grew);
-  const growTime = (m: number) => at(growth[m - 1].step);
+  const growTimes = growth.map((g) => at(g.step));
   const taperShape = (e: number) => (e < TAPER.length ? TAPER[e] : 1);
   const rim = dark ? theme.surface : theme.ink;
   const rimOpacity = dark ? 1 : 0.8;
+  const fills = growth.map((g) => spriteColor(theme, g.cell));
+  const fillOf = (i: number) => fills[i - 1];
+  const jointOf = (i: number) => (i === 1 ? fills[0] : mixColors(fills[i - 2], fills[i - 1]));
 
-  // The body is drawn as short dashes of one stroked route through the cell centres, so it is an exact tube
-  // around the path at every instant. Pieces that were slid along the path as separate shapes cut corners
-  // differently depending on where they sat relative to the turn, and the corner pulsed as the snake moved.
+  // The body is drawn as dashes of one stroked route through the cell centres, so it is an exact tube around
+  // the path at every instant. Pieces that were slid along the path as separate shapes cut corners differently
+  // depending on where they sat relative to the turn, and the corner pulsed as the snake moved.
   const pitch = Math.abs(px(1)[0] - px(0)[0]);
-  const reach = Math.ceil(lastStep * pitch) + pitch;
-  const route: string[] = [];
+  const routeLength = lastStep * pitch;
+  const corners: [number, number][] = [];
   for (let k = 0; k <= lastStep; k++) {
-    if (k === 0 || k === lastStep || dirs[k - 1] !== dirs[k]) {
-      const [x, y] = px(sim.path[k]);
-      route.push(`${route.length ? "L" : "M"}${fmt(x)} ${fmt(y)}`);
+    if (k === 0 || k === lastStep || dirs[k - 1] !== dirs[k]) corners.push(px(sim.path[k]));
+  }
+  // Every leg is horizontal or vertical, so H and V keep the path short; it is repeated once per body piece.
+  const pathOf = (points: [number, number][]) =>
+    points
+      .map(([x, y], i) => (i === 0 ? `M${fmt(x)} ${fmt(y)}` : y === points[i - 1][1] ? `H${fmt(x)}` : `V${fmt(y)}`))
+      .join("");
+  const forward = pathOf(corners);
+  const backward = pathOf([...corners].reverse());
+  const dash = pitch / 2;
+  const gapTail = routeLength + 1000;
+  // Each piece is its own copy of the route rather than a <use> of a shared one: Chrome restyles a <use>'s whole
+  // cloned subtree whenever an inherited property such as the dash offset changes, which made the body several
+  // times more expensive per frame than the copies are.
+  const forwardPath = (attrs: string) =>
+    `<path d="${forward}" fill="none" stroke-dasharray="${fmt(dash)} ${fmt(gapTail)}" stroke-linecap="round" stroke-linejoin="round" ${attrs}/>`;
+  const backwardPath = (attrs: string) => `<path d="${backward}" fill="none" stroke-linejoin="round" ${attrs}/>`;
+
+  // Head position in path steps. Pieces trail the head by whole and half steps, which is a distance along the
+  // path rather than a time lag, so they stay right through the speed-up without a second copy of the body.
+  const knots: [number, number][] = [[at(0), 0]];
+  for (const p of phases.slice(1)) knots.push([at(p.from), p.from]);
+  knots.push([at(lastStep), lastStep]);
+  const headStep = (t: number) => {
+    if (t <= knots[0][0]) return 0;
+    for (let k = 1; k < knots.length; k++) {
+      const [t1, s1] = knots[k];
+      if (t > t1) continue;
+      const [t0, s0] = knots[k - 1];
+      return s0 + ((t - t0) / (t1 - t0)) * (s1 - s0);
+    }
+    return lastStep;
+  };
+  const grownBy = (t: number) => growTimes.filter((g) => g <= t).length;
+  const vanish = fadeEnd + 0.01;
+  const sampleTimes = (extra: number[]) =>
+    [...new Set([0, ...knots.map((k) => k[0]), ...extra, fadeEnd, vanish])].filter((t) => t <= vanish).sort((a, b) => a - b);
+  // At a growth instant the old and new state share a time, which the timeline plays as a jump.
+  const statesAt = (t: number): number[] => {
+    const m = grownBy(t);
+    return growTimes[m - 1] === t ? [m - 1, m] : [m];
+  };
+
+  // The tail tapers and pops in as it grows, so its last few half segments are drawn one by one: slot e is
+  // always the e-th half segment from the tail tip and takes over the piece that held slot e - 2 on each growth.
+  const popEnds = growTimes.map((g, k) => Math.min(g + POP, growTimes[k + 1] ?? Infinity));
+  const tailTimes = sampleTimes([...growTimes, ...popEnds]);
+  const tailSlot = (e: number, size: number, color: (i: number) => string | null): string => {
+    const frames: Frame[] = [];
+    for (const t of tailTimes) {
+      for (const m of statesAt(t)) {
+        const i = m - Math.floor(e / 2);
+        const offset = `stroke-dashoffset:${fmt(dash / 2 - (headStep(t) - (m - e / 2)) * pitch)}px`;
+        const stroke = color(Math.max(i, 1));
+        const paint = stroke ? `;stroke:${stroke}` : "";
+        if (i < 1 || t >= vanish) {
+          frames.push([t, `opacity:0;stroke-width:${fmt(size * 0.2)};${offset}${paint}`]);
+          continue;
+        }
+        const g = growTimes[m - 1];
+        const end = popEnds[m - 1];
+        const f = t >= end ? 1 : (t - g) / (end - g);
+        const from = e < 2 ? 0.2 : taperShape(e - 2);
+        const opacity = e < 2 ? f : 1;
+        frames.push([t, `opacity:${fmt(opacity)};stroke-width:${fmt(size * (from + (taperShape(e) - from) * f))};${offset}${paint}`]);
+      }
+    }
+    return tl.track(frames);
+  };
+  const tailTube: string[] = [];
+  const tailRim: string[] = [];
+  if (growth.length > 0) {
+    for (let e = 0; e < TAPER.length; e++) {
+      tailTube.push(forwardPath(`class="${tailSlot(e, BODY, (i) => (e % 2 ? jointOf(i) : fillOf(i)))}"`));
+      tailRim.push(forwardPath(`class="${tailSlot(e, BODY + 2 * OUTLINE, () => null)}" stroke="${rim}"`));
     }
   }
-  const dash = pitch / 2;
-  // A dash starts at -offset along the route; the gap is longer than the route so the pattern never repeats.
-  const along = (steps: number) => `stroke-dashoffset:${fmt(dash / 2 - steps * pitch)}px`;
 
-  // Each speed gets its own copy of the body. Segment i trails the head by i steps, which is a fixed time lag
-  // only while the speed is constant, so a copy is shown for exactly the stretch its lag is right for.
-  const copies = phases.map((phase, j) => {
-    const lo = j === 0 ? 0 : Math.max(0, phase.from - growth.length - 2);
-    const hi = j + 1 < phases.length ? phases[j + 1].from : lastStep;
-    const tLo = atIn(j, lo);
-    const frames: Frame[] =
-      tLo >= 0
-        ? [[tLo, along(lo)], [atIn(j, hi), along(hi)]]
-        : [[0, along(lo - tLo / phase.s)], [atIn(j, hi), along(hi)]];
-    return { track: tl.keyframes(frames), s: phase.s };
-  });
-  const gates = copies.map((_, j) => {
-    if (copies.length === 1) return "";
-    const switchAt = starts[1];
-    return tl.track(
-      j === 0
-        ? [[0, "opacity:1"], [switchAt, "opacity:1"], [switchAt, "opacity:0"]]
-        : [[0, "opacity:0"], [switchAt, "opacity:0"], [switchAt, "opacity:1"]],
-    );
-  });
-
-  const tube: string[][] = copies.map(() => []);
-  const shadow: string[][] = copies.map(() => []);
-  for (let i = growth.length; i >= 1; i--) {
-    // Half segment `e` counts from the tail tip: a piece's own centre is even, the bridge towards the head odd.
-    const look = (size: number, odd: number) => {
-      const width = (scale: number) => `stroke-width:${fmt(size * scale)}`;
-      const frames: Frame[] = [[0, `opacity:0;${width(0.2)}`]];
-      for (let j = 0; 2 * j <= TAPER.length; j++) {
-        const m = i + j;
-        if (m > growth.length) break;
-        const start = growTime(m);
-        const next = m + 1 <= growth.length ? growTime(m + 1) : Infinity;
-        const end = Math.min(start + POP, next);
-        const from = j === 0 ? `opacity:0;${width(0.2)}` : `opacity:1;${width(taperShape(2 * j - 2 + odd))}`;
-        frames.push([start, from], [end, `opacity:1;${width(taperShape(2 * j + odd))}`]);
-      }
-      frames.push([fadeEnd, frames[frames.length - 1][1]], [fadeEnd + 0.01, "opacity:0"]);
-      return tl.track(frames);
-    };
-    const looks = [look(BODY, 0), look(BODY, 1), look(BODY + 2 * OUTLINE, 0), look(BODY + 2 * OUTLINE, 1)];
-    const fill = spriteColor(theme, growth[i - 1].cell);
-    const joint = i === 1 ? fill : mixColors(spriteColor(theme, growth[i - 2].cell), fill);
-    copies.forEach((copy, j) => {
-      const pos = tl.useKeyframes(copy.track, i * copy.s);
-      const bridge = tl.useKeyframes(copy.track, (i - 0.5) * copy.s);
-      const piece = (look: string, cls: string, color: string) =>
-        `<g class="${look}"><use class="${cls}" href="#body-route" stroke="${color}"/></g>`;
-      tube[j].push(piece(looks[0], pos, fill), piece(looks[1], bridge, joint));
-      shadow[j].push(piece(looks[2], pos, rim), piece(looks[3], bridge, rim));
-    });
+  // Ahead of the tail every piece is full width and keeps its colour. They all hang off one moving dash origin
+  // at the head (the zero-length first dash leaves a dot there, which the head covers), so the only thing each
+  // piece animates is the moment it joins. Pieces are stacked head over tail so each round cap overlaps the
+  // piece behind, as the tail pieces do.
+  const mainCount = (m: number) => Math.max(0, m - TAPER.length / 2);
+  const mainTube: string[] = [];
+  for (let i = mainCount(growth.length); i >= 1; i--) {
+    const joins = growTimes[i + TAPER.length / 2 - 1];
+    const shown = tl.track([
+      [0, "opacity:0"],
+      [joins, "opacity:0"],
+      [joins, "opacity:1"],
+      [fadeEnd, "opacity:1"],
+      [vanish, "opacity:0"],
+    ]);
+    for (const [lag, color] of [[i, fillOf(i)], [i - 0.5, jointOf(i)]] as const) {
+      const pattern = [0, lag * pitch - dash / 2, dash, gapTail].map(fmt).join(" ");
+      mainTube.push(backwardPath(`class="${shown}" stroke="${color}" stroke-dasharray="${pattern}"`));
+    }
   }
-  const gated = (parts: string[][]) =>
-    parts.map((p, j) => (gates[j] ? `<g class="${gates[j]}">${p.join("")}</g>` : p.join(""))).join("");
-  const dashing = `stroke-dasharray="${fmt(dash)} ${reach}"`;
+
+  // The outline is one colour under a group opacity, so ahead of the tail it can be a single stroke along the
+  // reversed route whose dash starts at the head and grows by a step on every growth.
+  const rimFrames = (m: number) =>
+    `stroke-dasharray:${mainCount(m) > 0 ? fmt(mainCount(m) * pitch + dash / 2) : 0} ${fmt(gapTail)}`;
+  const mainRim =
+    mainCount(growth.length) > 0
+      ? backwardPath(`class="${tl.track([
+          [0, rimFrames(0)],
+          ...growTimes.flatMap((g, k): Frame[] => [[g, rimFrames(k)], [g, rimFrames(k + 1)]]),
+          [fadeEnd, rimFrames(growth.length)],
+          [vanish, rimFrames(0)],
+        ])}" stroke="${rim}" stroke-width="${BODY + 2 * OUTLINE}"`)
+      : "";
+  // A blur filter over the body would cover the whole route's bounding box and be redrawn every frame, so the
+  // body glows with two soft-edged wide strokes instead and only the small head keeps the real filter.
+  const haloFrames = (m: number, opacity: number) =>
+    `opacity:${m > 0 ? opacity : 0};stroke-dasharray:${fmt(Math.max(0, m - 2.5) * pitch)} ${fmt(gapTail)}`;
+  const halos =
+    theme.glow > 0 && growth.length > 0
+      ? HALO.map(([reach, opacity]) =>
+            backwardPath(
+              `class="${tl.track([
+                [0, haloFrames(0, opacity)],
+                ...growTimes.flatMap((g, k): Frame[] => [[g, haloFrames(k, opacity)], [g, haloFrames(k + 1, opacity)]]),
+                [fadeEnd, haloFrames(growth.length, opacity)],
+                [vanish, haloFrames(0, opacity)],
+              ])}" stroke="${theme.sprites[1]}" stroke-linecap="round" stroke-width="${fmt(BODY + 2 * (OUTLINE + reach * theme.glow))}"`,
+            ),
+          )
+          .join("")
+      : "";
+  const followHead = tl.keyframes(
+    sampleTimes([]).map((t): Frame => [t, `stroke-dashoffset:${fmt((headStep(t) - lastStep) * pitch)}px`]),
+  );
+  const mainGroup = (inner: string) => (inner ? `<g class="${tl.useKeyframes(followHead, 0)}">${inner}</g>` : "");
 
   const baseCells: string[] = [];
   const foodCells: string[] = [];
   const pops: string[] = [];
   const eatTime = new Map<Cell, number>();
   for (const e of sim.eats) eatTime.set(e.cell, at(e.step));
-  const popFrames: Frame[] = [
-    [0, "opacity:1;transform:scale(.6)"],
-    [EAT_HOLD, "opacity:1;transform:scale(1)"],
-    [EAT_HOLD + EAT_FADE, "opacity:0;transform:scale(2.3)"],
-  ];
-  const popTrack = tl.keyframes(popFrames);
+  // Pops are short and never many at once, so a few shared elements play all of them in turn: every element
+  // on the page costs style work on every frame, even while it sits invisible between its moments.
+  const popSlots: { free: number; frames: Frame[]; x: number; y: number }[] = [];
+  const popLook = (x: number, y: number, s: number, o: number) => `opacity:${o};${translate(x, y, `scale(${s})`)}`;
+  const addPop = (te: number, x: number, y: number) => {
+    let slot = popSlots.find((p) => p.free <= te);
+    if (!slot) {
+      slot = { free: 0, frames: [[0, popLook(x, y, 2.3, 0)]], x, y };
+      popSlots.push(slot);
+    }
+    slot.frames.push(
+      [te, popLook(slot.x, slot.y, 2.3, 0)],
+      [te, popLook(x, y, 0.6, 1)],
+      [te + EAT_HOLD, popLook(x, y, 1, 1)],
+      [te + EAT_HOLD + EAT_FADE, popLook(x, y, 2.3, 0)],
+    );
+    Object.assign(slot, { free: te + EAT_HOLD + EAT_FADE, x, y });
+  };
   const bigTrack = tl.keyframes([
     [0, "opacity:1;transform:scale(.5)"],
     [0.2, "opacity:1;transform:scale(1.4)"],
@@ -481,10 +573,16 @@ function render(ctx: GameContext): GameOutput {
       ]);
       foodCells.push(cellRect(layout, cell, fill, `class="${cls}"`));
       const [cx, cy] = cellCenter(layout, cell.x, cell.y);
-      const big = cell === lastEat;
-      const pop = tl.useKeyframes(big ? bigTrack : popTrack, te);
-      pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><use class="${pop}" href="#${big ? "pop-big" : "pop"}"/></g>`);
+      if (cell !== lastEat) {
+        addPop(te, cx, cy);
+        continue;
+      }
+      pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><use class="${tl.useKeyframes(bigTrack, te)}" href="#pop-big"/></g>`);
     }
+  }
+
+  for (const slot of [...popSlots].sort((a, b) => a.free - b.free)) {
+    pops.push(`<use class="${tl.track(slot.frames)}" href="#pop"/>`);
   }
 
   const spark = (n: number, radius: number, size: number) =>
@@ -497,7 +595,6 @@ function render(ctx: GameContext): GameOutput {
   const defs =
     glowDefs(theme) +
     `<g id="pop"><circle r="7" fill="none" stroke="${flash}" stroke-width="1.4"/>${spark(8, 7, 1.7)}</g>` +
-    (growth.length > 0 ? `<path id="body-route" d="${route.join("")}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>` : "") +
     `<g id="pop-big"><circle r="8" fill="none" stroke="${flash}" stroke-width="2"/><circle r="5" fill="none" stroke="${theme.accent}" stroke-width="2"/>${spark(12, 8, 2.1)}</g>`;
 
   const clears: ClearEvent[] = sim.eats.map((e) => ({ t: at(e.step), cell: e.cell }));
@@ -513,7 +610,7 @@ function render(ctx: GameContext): GameOutput {
       })
     : "";
 
-  const head = `<g class="${headPos}"><g class="${headTurn}"><g class="${headWiggle}">
+  const head = `<g class="${headPos}"${glowAttr(theme)}><g class="${headTurn}"><g class="${headWiggle}">
 <rect x="${-HEAD / 2}" y="${-HEAD / 2}" width="${HEAD}" height="${HEAD}" rx="${HEAD * 0.42}" fill="${theme.accent}" stroke="${rim}" stroke-opacity="${rimOpacity}" stroke-width="${OUTLINE}"/>
 <circle cx="2.6" cy="-3.4" r="2.4" fill="#fff"/><circle cx="2.6" cy="3.4" r="2.4" fill="#fff"/>
 <circle cx="3.4" cy="-3.4" r="1.2" fill="#111"/><circle cx="3.4" cy="3.4" r="1.2" fill="#111"/>
@@ -523,7 +620,8 @@ function render(ctx: GameContext): GameOutput {
   const bodyMarkup = [
     `<g>${baseCells.join("")}</g>`,
     `<g>${foodCells.join("")}</g>`,
-    `<g class="${snakeFade}"${glowAttr(theme)}><g ${dashing}><g opacity="${rimOpacity}">${gated(shadow)}</g>${gated(tube)}</g>${head}</g>`,
+    `<g class="${snakeFade}">${mainGroup(halos)}<g opacity="${rimOpacity}">${tailRim.join("")}${mainGroup(mainRim)}</g>` +
+      `${tailTube.join("")}<g stroke-width="${BODY}" stroke-linecap="round">${mainGroup(mainTube.join(""))}</g>${head}</g>`,
     `<g>${pops.join("")}</g>`,
     bar,
     end,
