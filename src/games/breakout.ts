@@ -358,6 +358,7 @@ export function pacePlay(sim: BreakoutPlay): PlayClock {
 
 const FLASH_TIME = 0.08;
 const CHIP_LIFE = 0.6;
+const CHIP_GROUPS = 30;
 const CHIP_GRAVITY = 300;
 const EMBERS = ["#ffd23f", "#ff9a2a"];
 
@@ -381,17 +382,47 @@ const CHIPS: Chip[] = [
   { vx: 46, vy: -54, size: 2.8, spin: 0, spark: true },
 ];
 
-function chipFrames(c: Chip): Frame[] {
+/** Keyframes for one chip's flight, relative to the group it sits in. `life` is the whole cycle. */
+function chipKeyframes(name: string, c: Chip, life: number): string {
   const steps = 7;
-  const out: Frame[] = [];
+  const out: string[] = [];
   for (let k = 0; k <= steps; k++) {
-    const u = (k / steps) * CHIP_LIFE;
-    const fade = Math.min(1, (CHIP_LIFE - u) / (CHIP_LIFE * 0.5));
+    const u = (k / steps) * life;
+    const fade = Math.min(1, (life - u) / (life * 0.5));
     const x = c.vx * u;
     const y = c.vy * u + 0.5 * CHIP_GRAVITY * u * u;
-    out.push([u, `opacity:${fmt(fade)};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(c.spin * u)}deg) scale(${fmt(0.55 + 0.45 * fade)})`]);
+    out.push(`${Math.round((k / steps) * 1e5) / 1e3}%{opacity:${fmt(fade)};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(c.spin * u)}deg) scale(${fmt(0.55 + 0.45 * fade)})}`);
   }
-  return out;
+  return `@keyframes ${name}{${out.join("")}}`;
+}
+
+/**
+ * One-shot effects share a few elements instead of one each: every slot plays
+ * its events back to back on a single keyframe track, parked invisible in
+ * between, so the browser has far fewer infinite animations to service.
+ * Events must be added in start order; a slot is only reused for the same key.
+ */
+class Pool {
+  private readonly slots: { key: string; end: number; frames: Frame[] }[] = [];
+  private readonly idle: string;
+
+  constructor(idle: string) {
+    this.idle = idle;
+  }
+
+  add(key: string, start: number, end: number, frames: Frame[]): void {
+    let slot = this.slots.find((s) => s.key === key && s.end <= start);
+    if (!slot) {
+      slot = { key, end: 0, frames: [[0, this.idle]] };
+      this.slots.push(slot);
+    }
+    slot.frames.push([start, this.idle], ...frames, [end, this.idle]);
+    slot.end = end;
+  }
+
+  markup(tl: Timeline, draw: (key: string, cls: string) => string): string {
+    return this.slots.map((s) => draw(s.key, tl.track(s.frames))).join("");
+  }
 }
 
 /** Crack lines across a 12 px brick, three variants so neighbours don't match. */
@@ -411,6 +442,37 @@ function smoothGlide(t0: number, x0: number, t1: number, x1: number): [number, n
   }
   out.push([t1, x1]);
   return out;
+}
+
+function erf(x: number): number {
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t) * Math.exp(-x * x);
+  return x < 0 ? -y : y;
+}
+
+/**
+ * A static glow for a line, as stacked translucent strokes instead of a blur
+ * filter. A filter over a path that spans the whole field is blurred again on
+ * every frame of the animation, which costs far more than a few plain strokes.
+ * Layer opacities follow the profile a Gaussian blur gives a line of this width.
+ */
+function haloStrokes(d: string, color: string, width: number, sigma: number): string {
+  const profile = (dist: number) => 0.5 * (erf((dist + width / 2) / (sigma * Math.SQRT2)) - erf((dist - width / 2) / (sigma * Math.SQRT2)));
+  const step = Math.max(0.35, sigma / 3.2);
+  const targets: number[] = [];
+  for (let j = 1; ; j++) {
+    const t = profile(width / 2 + (j - 0.5) * step);
+    if (t < 0.01) break;
+    targets.push(t);
+  }
+  const out: string[] = [];
+  for (let j = targets.length - 1; j >= 0; j--) {
+    const outer = j + 1 < targets.length ? targets[j + 1] : 0;
+    const alpha = 1 - (1 - targets[j]) / (1 - outer);
+    const stroke = fmt(width + 2 * (j + 1) * step);
+    out.push(`<path d="${d}" fill="none" stroke="${color}" stroke-opacity="${Math.round(alpha * 1000) / 1000}" stroke-width="${stroke}" stroke-linejoin="round"/>`);
+  }
+  return out.join("");
 }
 
 const state = (fill: string, opacity: number, scale: number) => `fill:${fill};opacity:${opacity};transform:scale(${scale})`;
@@ -441,8 +503,10 @@ function render(ctx: GameContext): GameOutput {
   const wallBottom = court.padTop + PADDLE_H + 4;
 
   const parts: string[] = [];
+  const wall = `M${court.fieldL - 1.5} ${wallBottom}V${court.fieldT - 1.5}H${court.fieldR + 1.5}V${wallBottom}`;
   parts.push(
-    `<path d="M${court.fieldL - 1.5} ${wallBottom}V${court.fieldT - 1.5}H${court.fieldR + 1.5}V${wallBottom}" fill="none" stroke="${theme.accent}" stroke-width="3" stroke-linejoin="round"${glow}/>`,
+    (theme.glow > 0 ? haloStrokes(wall, theme.accent, 3, theme.glow) : "") +
+      `<path d="${wall}" fill="none" stroke="${theme.accent}" stroke-width="3" stroke-linejoin="round"/>`,
     `<path d="M${court.fieldL + 1.5} ${wallBottom}V${court.fieldT + 1.5}H${court.fieldR - 1.5}V${wallBottom}" fill="none" stroke="${theme.ink}" stroke-opacity=".28" stroke-width="1"/>`,
   );
   for (const cell of allCells(grid)) parts.push(cellRect(layout, cell, theme.empty));
@@ -454,20 +518,16 @@ function render(ctx: GameContext): GameOutput {
     hitsByCell.set(h.cell, list);
   }
 
-  const chipNames = CHIPS.map((c) => tl.keyframes(chipFrames(c)));
-  const chipCss = chipNames.map((name, i) => `.c${i}{animation:${name} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`);
-  const ringName = tl.keyframes([
-    [0, "opacity:.9;transform:scale(.4)"],
-    [0.35, "opacity:0;transform:scale(2.8)"],
-  ]);
+  const cracks = new Pool("opacity:0;transform:translate(0px,0px)");
+  const padRings = new Pool("opacity:0;transform:translate(0px,0px) scale(2.8)");
   const bigRingName = tl.keyframes([
     [0, "opacity:1;transform:scale(.3)"],
     [0.7, "opacity:0;transform:scale(9)"],
   ]);
   const delayFor = (t: number) => `--d:${fmt(-(duration - t))}s`;
 
-  const cracks: string[] = [];
-  const pops: string[] = [];
+  const flights: { start: number; cx: number; cy: number; base: string; spark: string }[] = [];
+  const crackEvents: { start: number; end: number; variant: number; ox: number; oy: number }[] = [];
   const clears: ClearEvent[] = [];
   for (const cell of activeCells(grid)) {
     const hits = hitsByCell.get(cell) ?? [];
@@ -490,23 +550,62 @@ function render(ctx: GameContext): GameOutput {
         const burning = sim.fire !== null && h.t >= sim.fire.t;
         const base = burning ? EMBERS[1] : spriteColor(theme, { level: Math.min(4, cell.level + 1) as Cell["level"] });
         const spark = burning ? EMBERS[0] : flash;
-        const chips = CHIPS.map((c, i) => {
-          const s = c.size;
-          return `<rect class="p c${i}"${c.spark ? ` fill="${spark}"` : ""} x="${fmt(-s / 2)}" y="${fmt(-s / 2)}" width="${s}" height="${s}"/>`;
-        }).join("");
-        pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})" fill="${base}" style="${delayFor(t + 0.06)}">${chips}</g>`);
+        flights.push({ start: t + 0.06, cx, cy, base, spark });
         if (crackAt >= 0 && t > crackAt + FLASH_TIME + 0.02) {
           const [ox, oy] = [layout.left + cell.x * layout.pitch, layout.top + cell.y * layout.pitch];
-          const d = CRACKS[(cell.x + cell.y * 2) % CRACKS.length].map(([x, y], i) => `${i ? "L" : "M"}${fmt(ox + x)} ${fmt(oy + y)}`).join("");
-          const cls = tl.track([[0, "opacity:0"], [crackAt + FLASH_TIME, "opacity:0"], [crackAt + FLASH_TIME + 0.001, "opacity:1"], [t, "opacity:1"], [t + 0.001, "opacity:0"]]);
-          cracks.push(`<path class="${cls}" d="${d}" fill="none" stroke="${theme.surface}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`);
+          crackEvents.push({ start: crackAt + FLASH_TIME, end: t + 0.001, variant: (cell.x + cell.y * 2) % CRACKS.length, ox, oy });
         }
       }
     }
     frames.push([back, state(top, 0, 1)], [back + PACE.restore, state(top, 1, 1)]);
     parts.push(cellRect(layout, cell, top, `class="b ${tl.track(frames)}"`));
   }
-  parts.push(...cracks, ...pops);
+  for (const c of crackEvents.sort((a, b) => a.start - b.start)) {
+    const pos = translate(c.ox, c.oy);
+    cracks.add(String(c.variant), c.start, c.end, [
+      [c.start, "opacity:0;" + pos],
+      [c.start + 0.001, "opacity:1;" + pos],
+      [c.end - 0.001, "opacity:1;" + pos],
+      [c.end, "opacity:0;" + pos],
+    ]);
+  }
+
+  // Chips fly the same arc every time, so their keyframes are shared and loop on
+  // a period that divides the loop exactly. Each group of chips sits at a fixed
+  // phase of that period and is shown, moved and recoloured per brick, so a
+  // flight starts at the nearest free phase boundary, within half a bin.
+  const loopLen = Number(fmt(duration));
+  const chipPeriod = loopLen / Math.max(1, Math.round(loopLen / CHIP_LIFE));
+  const bin = chipPeriod / CHIP_GROUPS;
+  const chipOff = "opacity:0;fill:#000;color:#000;transform:translate(0px,0px)";
+  const chipTracks: Frame[][] = Array.from({ length: CHIP_GROUPS }, () => [[0, chipOff]]);
+  const taken = new Set<number>();
+  for (const f of flights.sort((a, b) => a.start - b.start)) {
+    let n = Math.round(f.start / bin);
+    while (taken.has(n)) n++;
+    taken.add(n);
+    const t = n * bin;
+    const on = `opacity:1;fill:${f.base};color:${f.spark};` + translate(f.cx, f.cy);
+    chipTracks[n % CHIP_GROUPS].push([t, chipOff], [t, on], [t + chipPeriod, on], [t + chipPeriod, chipOff]);
+  }
+  const chipMarkup = chipTracks
+    .map((frames, j) => {
+      const cls = tl.track(frames);
+      const rects = CHIPS.map((c, i) => {
+        const half = fmt(-c.size / 2);
+        return `<rect class="c${i}"${c.spark ? ' fill="currentColor"' : ""} x="${half}" y="${half}" width="${c.size}" height="${c.size}"/>`;
+      }).join("");
+      return `<g class="${cls}" style="--d:${(j * bin - chipPeriod).toFixed(5)}s">${rects}</g>`;
+    })
+    .join("");
+  parts.push(
+    cracks.markup(tl, (variant, cls) => {
+      const d = CRACKS[Number(variant)].map(([x, y], i) => `${i ? "L" : "M"}${x} ${y}`).join("");
+      return `<path class="${cls}" d="${d}" fill="none" stroke="${theme.surface}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }),
+    chipMarkup,
+  );
+  const chipCss = CHIPS.map((c, i) => chipKeyframes(`cf${i}`, c, chipPeriod) + `.c${i}{animation:cf${i} ${chipPeriod.toFixed(7)}s linear infinite;animation-delay:var(--d)}`);
 
   const lastHit = sim.hits.length ? sim.hits[sim.hits.length - 1] : null;
   if (lastHit) {
@@ -521,13 +620,16 @@ function render(ctx: GameContext): GameOutput {
   }
 
   const ringCss = [
-    `.pr{animation:${ringName} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`,
     `.bring{animation:${bigRingName} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`,
   ];
-  const padRings: string[] = [];
   for (const [t, x, y] of sim.ball.slice(1)) {
     if (y !== startY) continue;
-    padRings.push(`<ellipse class="p pr" cx="${fmt(x)}" cy="${fmt(court.padTop)}" rx="7" ry="1.6" fill="none" stroke="${theme.accent}" stroke-width="1.5" style="${delayFor(at(t))}"/>`);
+    const t0 = at(t);
+    const at0 = (scale: number, opacity: number) => `opacity:${opacity};` + translate(x, court.padTop, `scale(${scale})`);
+    padRings.add("", t0, t0 + 0.35, [
+      [t0, at0(0.4, 0.9)],
+      [t0 + 0.35, at0(2.8, 0)],
+    ]);
   }
 
   // Paddle: glides between contact points, with a squash on every touch.
@@ -570,7 +672,9 @@ function render(ctx: GameContext): GameOutput {
   paddleFrames.push([duration, pos(court.startX)]);
   ballFrames.push([duration, ballPos(court.startX, startY)]);
 
-  parts.push(...padRings);
+  parts.push(
+    padRings.markup(tl, (_, cls) => `<ellipse class="${cls}" rx="7" ry="1.6" fill="none" stroke="${theme.accent}" stroke-width="1.5"/>`),
+  );
   const padRaw = tl.track(paddleFrames);
   const padSquash = tl.track(squash, "linear");
   const padW = PADDLE_HALF * 2;
@@ -634,8 +738,8 @@ function render(ctx: GameContext): GameOutput {
   const css = [
     ".b,.p,.sq,.ring{transform-box:fill-box;transform-origin:center}",
     ".sq{transform-origin:50% 100%}",
-    ...chipCss,
     ...ringCss,
+    ...chipCss,
     tl.css(),
   ].join("\n");
   return { width: layout.width, height: layout.height, css, defs: glowDefs(theme), body: parts.join("\n") };
