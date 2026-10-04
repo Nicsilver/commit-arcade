@@ -122,14 +122,14 @@ var Timeline = class {
    * Two frames at the same time make an instant jump, e.g. teleporting or
    * switching sprites.
    */
-  track(frames2, timing = "linear") {
-    const name = this.keyframes(frames2);
+  track(frames, timing = "linear") {
+    const name = this.keyframes(frames);
     return this.useKeyframes(name, 0, timing);
   }
   /** Registers bare @keyframes so several elements can share them with different delays. */
-  keyframes(frames2) {
+  keyframes(frames) {
     const name = `${this.prefix}${this.count++}`;
-    this.rules.push(`@keyframes ${name}{${this.body(frames2)}}`);
+    this.rules.push(`@keyframes ${name}{${this.body(frames)}}`);
     return name;
   }
   /**
@@ -161,9 +161,9 @@ var Timeline = class {
   css() {
     return this.rules.join("\n");
   }
-  body(frames2) {
-    if (frames2.length === 0) throw new Error("A track needs at least one frame");
-    const sorted = frames2.map(([t, css], i) => ({ t: Math.round(Math.min(Math.max(t, 0), this.duration) * 1e5) / 1e5, css, i })).sort((a, b) => a.t - b.t || a.i - b.i);
+  body(frames) {
+    if (frames.length === 0) throw new Error("A track needs at least one frame");
+    const sorted = frames.map(([t, css], i) => ({ t: Math.round(Math.min(Math.max(t, 0), this.duration) * 1e5) / 1e5, css, i })).sort((a, b) => a.t - b.t || a.i - b.i);
     if (sorted[0].t > 0) sorted.unshift({ t: 0, css: sorted[0].css, i: -1 });
     const last = sorted[sorted.length - 1];
     if (last.t < this.duration) sorted.push({ t: this.duration, css: last.css, i: Infinity });
@@ -285,6 +285,9 @@ function pixelText(text, scale = 2) {
   return { d: parts.join(""), width: Math.max(0, chars.length * 6 - 1) * scale, height: 7 * scale };
 }
 function bitmapPath(rows, scale = 1, ox = 0, oy = 0) {
+  return bitmapRects(rows).map((r) => `M${fmt(ox + r.x * scale)} ${fmt(oy + r.y * scale)}h${fmt((r.end - r.x) * scale)}v${fmt(r.h * scale)}h${fmt(-(r.end - r.x) * scale)}z`).join("");
+}
+function bitmapRects(rows) {
   const open = /* @__PURE__ */ new Map();
   const done = [];
   rows.forEach((row, y) => {
@@ -312,7 +315,7 @@ function bitmapPath(rows, scale = 1, ox = 0, oy = 0) {
     }
   });
   done.push(...open.values());
-  return done.map((r) => `M${fmt(ox + r.x * scale)} ${fmt(oy + r.y * scale)}h${fmt((r.end - r.x) * scale)}v${fmt(r.h * scale)}h${fmt(-(r.end - r.x) * scale)}z`).join("");
+  return done;
 }
 
 // src/svg.ts
@@ -438,13 +441,13 @@ function scoreDigits(tl, opts, x, y, fill) {
         out.push(`<path d="${glyph.d}" transform="${transform}" fill="${fill}"/>`);
         continue;
       }
-      const frames2 = [];
+      const frames = [];
       runs.forEach((r, i) => {
         const on = r.d === digit ? "opacity:1" : "opacity:0";
-        if (i > 0) frames2.push([r.t, runs[i - 1].d === digit ? "opacity:1" : "opacity:0"]);
-        frames2.push([r.t, on]);
+        if (i > 0) frames.push([r.t, runs[i - 1].d === digit ? "opacity:1" : "opacity:0"]);
+        frames.push([r.t, on]);
       });
-      out.push(`<path class="${tl.track(frames2)}" d="${glyph.d}" transform="${transform}" fill="${fill}"/>`);
+      out.push(`<path class="${tl.track(frames)}" d="${glyph.d}" transform="${transform}" fill="${fill}"/>`);
     }
   }
   return out.join("");
@@ -1106,6 +1109,22 @@ function playAsteroids(ctx) {
   return play;
 }
 var f1 = (n) => String(Math.round(n * 10) / 10);
+function playPooled(tl, events) {
+  const hold = ";animation-timing-function:step-end";
+  const slots = [];
+  for (const ev of [...events].sort((a, b) => a.from - b.from)) {
+    const frames = ev.frames.map((f, i) => i === ev.frames.length - 1 ? [f[0], f[1] + hold] : f);
+    let slot = slots.find((s) => s.key === ev.key && s.free <= ev.from);
+    if (!slot) {
+      slot = { key: ev.key, free: 0, frames: [[0, frames[frames.length - 1][1]]], make: ev.make };
+      slots.push(slot);
+    }
+    slot.frames.push(...frames);
+    slot.free = ev.to;
+  }
+  return slots.map((s) => s.make(tl.track(s.frames)));
+}
+var SHARD_TEMPLATES = 4;
 var SLOTS = 16;
 var DRIFT_DISTS = [27, 16, 9];
 function debrisBox(width, height) {
@@ -1243,14 +1262,6 @@ function renderAsteroids(ctx, play) {
     }
     return tl.useKeyframes(name, L(at));
   };
-  const burst = tl.keyframes([
-    [0, "transform:scale(.35);opacity:1;animation-timing-function:ease-out"],
-    [0.3, "transform:scale(1.9);opacity:0"]
-  ]);
-  const flash = tl.keyframes([
-    [0, "transform:scale(.5);opacity:1;animation-timing-function:ease-out"],
-    [0.16, "transform:scale(1.6);opacity:0"]
-  ]);
   const implode = tl.keyframes([
     [0, "transform:scale(2.4);opacity:0;animation-timing-function:ease-in"],
     [0.2, "transform:scale(1.7);opacity:.9"],
@@ -1274,7 +1285,7 @@ function renderAsteroids(ctx, play) {
   for (const hit of play.hits) {
     const c = hit.cell;
     const at = L(hit.t);
-    const frames2 = [
+    const frames = [
       [0, `fill:${level(c)}`],
       [at, `fill:${level(c)}`],
       [at + eps, `fill:${ink}`],
@@ -1283,7 +1294,7 @@ function renderAsteroids(ctx, play) {
       [restore, `fill:${theme.empty}`],
       [restore + PACE.restore, `fill:${level(c)}`]
     ];
-    body.push(cellRect(layout, c, level(c), `class="${tl.track(frames2)}"`));
+    body.push(cellRect(layout, c, level(c), `class="${tl.track(frames)}"`));
   }
   const rest = [];
   for (const col of grid.cells) {
@@ -1292,28 +1303,82 @@ function renderAsteroids(ctx, play) {
     }
   }
   body.unshift(...rest);
-  const spark = (x, y, scale, at, color) => `<g transform="translate(${f1(x)} ${f1(y)})${scale === 1 ? "" : ` scale(${scale})`}"><g class="${tl.useKeyframes(burst, L(at))}"><use href="#sp"/><use href="#se" color="${color}"/></g><circle r="3.4" class="fl ${tl.useKeyframes(flash, L(at))}"/></g>`;
+  const sparkEvents = [];
+  const spark = (x, y, scale, at, color) => {
+    const t = L(at);
+    const look = (k, opacity, ease = "") => `opacity:${opacity};transform:translate(${f1(x)}px,${f1(y)}px) scale(${fmt(scale * k)})${ease ? `;animation-timing-function:${ease}` : ""}`;
+    sparkEvents.push(
+      {
+        key: `burst:${color}`,
+        from: t,
+        to: t + 0.3,
+        make: (cls) => `<g class="${cls}"><use href="#sp"/><use href="#se" color="${color}"/></g>`,
+        frames: [[t, look(0.35, 1, "ease-out")], [t + 0.3, look(1.9, 0)]]
+      },
+      {
+        key: "flash",
+        from: t,
+        to: t + 0.16,
+        make: (cls) => `<circle r="3.4" class="fl ${cls}"/>`,
+        frames: [[t, look(0.5, 1, "ease-out")], [t + 0.16, look(1.6, 0)]]
+      }
+    );
+  };
+  const shardRng = createRng("asteroids-shards");
+  const shardTemplates = /* @__PURE__ */ new Map();
+  const templatesFor = (count) => {
+    let list = shardTemplates.get(count);
+    if (!list) {
+      list = Array.from({ length: SHARD_TEMPLATES }, () => shatter(shardRng, layout.cell, count));
+      shardTemplates.set(count, list);
+    }
+    return list;
+  };
+  const shardEvents = [];
+  const shard = (key, points, x, y, angle, dist, spin, turns, flip, fill, at) => {
+    const bx = Math.round(x * 10) / 10;
+    const by = Math.round(y * 10) / 10;
+    const mirror = flip < 0 ? " scale(-1,1)" : "";
+    const frames = [0, 0.12, 0.3, 0.55, 1].map((s) => {
+      const e = 1 - (1 - s) * (1 - s);
+      const op = s < 0.4 ? 1 : 1 - (s - 0.4) / 0.6;
+      const keep = s === 0 || s === 1 ? `;fill:${fill}` : "";
+      return [
+        L(at) + s * DEBRIS_LIFE,
+        `opacity:${fmt(op)}${keep};transform:translate(${f1(bx + Math.cos(angle) * dist * e)}px,${f1(by + Math.sin(angle) * dist * e)}px) rotate(${f1(turns * 90 + spin * e)}deg)${mirror}`
+      ];
+    });
+    shardEvents.push({
+      key,
+      from: L(at),
+      to: L(at) + DEBRIS_LIFE,
+      make: (cls) => `<polygon class="rd ${cls}" points="${points}"/>`,
+      frames
+    });
+  };
   const debris = [];
-  const sparks = [];
   const rocksOut = [];
-  const bulletsOut = [];
   for (const hit of play.hits) {
     const c = hit.cell;
     const [cx, cy] = cellCenter(layout, c.x, c.y);
     if (!hit.split) {
       const count = c.level >= 4 ? 4 : c.level === 3 ? 3 : 2 + Math.floor(rng() * 2);
-      for (const piece of shatter(rng, layout.cell, count)) {
-        const outward = Math.atan2(piece.cy, piece.cx);
-        const vx = Math.cos(outward) * 0.7 + Math.cos(hit.dir) * 0.9;
-        const vy = Math.sin(outward) * 0.7 + Math.sin(hit.dir) * 0.9;
-        const x = cx + piece.cx;
-        const y = cy + piece.cy;
-        debris.push(
-          `<g transform="translate(${f1(x)} ${f1(y)})"><polygon class="r${c.level} ${driftClass(x, y, vx, vy, hit.t)}" points="${piece.points}"/></g>`
-        );
-      }
+      const ti = Math.floor(rng() * SHARD_TEMPLATES);
+      const turns = Math.floor(rng() * 4);
+      const flip = rng() < 0.5 ? -1 : 1;
+      templatesFor(count)[ti].forEach((piece, pi) => {
+        const fx = flip * piece.cx;
+        const [px, py] = [[fx, piece.cy], [-piece.cy, fx], [-fx, -piece.cy], [piece.cy, -fx]][turns];
+        const outward = Math.atan2(py, px);
+        const x = cx + px;
+        const y = cy + py;
+        const { slot, dist } = driftPlan(x, y, Math.cos(outward) * 0.7 + Math.cos(hit.dir) * 0.9, Math.sin(outward) * 0.7 + Math.sin(hit.dir) * 0.9, dbox);
+        const variant = Math.floor(rng() * 4);
+        const spin = (variant & 1 ? -1 : 1) * (variant & 2 ? 300 : 190);
+        shard(`${count}.${ti}.${pi}`, piece.points, x, y, slot / SLOTS * Math.PI * 2, dist, spin, turns, flip, spriteColor(theme, c), hit.t);
+      });
     }
-    sparks.push(spark(hit.point.x, hit.point.y, hit.split ? 1.25 : 1, hit.t, theme.sprites[3]));
+    spark(hit.point.x, hit.point.y, hit.split ? 1.25 : 1, hit.t, theme.sprites[3]);
   }
   const hitOf = new Map(play.rockHits.map((h) => [h.rock, h]));
   for (const r of play.rocks) {
@@ -1321,10 +1386,10 @@ function renderAsteroids(ctx, play) {
     const life = r.t1 - r.t0;
     const pose = (t, scale, opacity) => {
       const p = rockAt(r, t);
-      return `opacity:${opacity};transform:translate(${fmt(p.x)}px,${fmt(p.y)}px) scale(${scale})`;
+      return `opacity:${opacity};transform:translate(${fmt(p.x)}px,${fmt(p.y)}px) scale(${scale}) rotate(${fmt(r.spin * (t - r.t0))}deg)`;
     };
     const grow = Math.min(0.14, life);
-    const frames2 = [
+    const frames = [
       [0, pose(r.t0, 0.5, 0)],
       [L(r.t0), pose(r.t0, 0.5, 0)],
       [L(r.t0) + eps, pose(r.t0, 0.5, 1)],
@@ -1333,16 +1398,10 @@ function renderAsteroids(ctx, play) {
       [L(r.t1), pose(r.t1, 1, 1)],
       [L(r.t1) + eps, pose(r.t1, 1, 0)]
     ];
-    const turn2 = tl.track([
-      [L(r.t0), "transform:rotate(0deg)"],
-      [L(r.t1), `transform:rotate(${fmt(r.spin * life)}deg)`]
-    ]);
     const points = rockCorners(r, 0).map((p) => `${f1(p.x)},${f1(p.y)}`).join(" ");
-    rocksOut.push(
-      `<g class="${tl.track(frames2)}"><polygon class="rock ${turn2}" fill="${spriteColor(theme, r.cell)}" points="${points}"/></g>`
-    );
+    rocksOut.push(`<polygon class="rock ${tl.track(frames)}" fill="${spriteColor(theme, r.cell)}" points="${points}"/>`);
     const end = rockAt(r, r.t1);
-    sparks.push(spark(h.point.x, h.point.y, 1.1, r.t1, theme.sprites[3]));
+    spark(h.point.x, h.point.y, 1.1, r.t1, theme.sprites[3]);
     const heading = Math.atan2(r.vy, r.vx);
     for (const w of rockWedges(r, r.spin * life)) {
       const x = end.x + w.cx;
@@ -1355,18 +1414,25 @@ function renderAsteroids(ctx, play) {
       );
     }
   }
-  for (const b of play.bullets) {
+  debris.unshift(...playPooled(tl, shardEvents));
+  const sparks = playPooled(tl, sparkEvents);
+  const bulletEvents = play.bullets.map((b) => {
     const from = `transform:translate(${fmt(b.from.x)}px,${fmt(b.from.y)}px)`;
     const to = `transform:translate(${fmt(b.to.x)}px,${fmt(b.to.y)}px)`;
-    const cls = tl.track([
-      [0, `opacity:0;${from}`],
-      [L(b.t0), `opacity:0;${from}`],
-      [L(b.t0) + eps, `opacity:1;${from}`],
-      [L(b.t1), `opacity:1;${to}`],
-      [L(b.t1) + eps, `opacity:0;${to}`]
-    ]);
-    bulletsOut.push(`<use href="#bl" class="${cls}"/>`);
-  }
+    return {
+      key: "bullet",
+      from: L(b.t0),
+      to: L(b.t1) + eps,
+      make: (cls) => `<use href="#bl" class="${cls}"/>`,
+      frames: [
+        [L(b.t0), `opacity:0;${from}`],
+        [L(b.t0) + eps, `opacity:1;${from}`],
+        [L(b.t1), `opacity:1;${to}`],
+        [L(b.t1) + eps, `opacity:0;${to}`]
+      ]
+    };
+  });
+  const bulletsOut = playPooled(tl, bulletEvents);
   let saucerOut = "";
   const ringAt = (p, kf, t, r = 15) => `<g transform="translate(${f1(p.x)} ${f1(p.y)})"><circle r="${r}" class="ring ${tl.useKeyframes(kf, t)}"/></g>`;
   const rings = [];
@@ -1375,14 +1441,14 @@ function renderAsteroids(ctx, play) {
     const pos = (p) => `transform:translate(${fmt(p.x)}px,${fmt(p.y)}px)`;
     const first2 = s.path[0];
     const last2 = s.path[s.path.length - 1];
-    const frames2 = [
+    const frames = [
       [0, `opacity:0;${pos(first2)}`],
       [L(s.tIn), `opacity:0;${pos(first2)}`],
       [L(s.tIn) + eps, `opacity:1;${pos(first2)}`],
       ...s.path.map((p) => [L(p.t), `opacity:1;${pos(p)}`]),
       [L(s.tOut) + eps, `opacity:0;${pos(last2)}`]
     ];
-    const cls = tl.track(frames2);
+    const cls = tl.track(frames);
     saucerOut += `<g class="${cls}"><use href="#ufo" class="halo"/><use href="#ufo" class="line"/></g>`;
     saucerOut += spark(last2.x, last2.y, 1.7, s.tOut, accent);
     rings.push(ringAt(last2, explode, L(s.tOut), 9));
@@ -1445,7 +1511,7 @@ function renderAsteroids(ctx, play) {
   const glow = glowAttr(theme);
   const css = [
     tl.css(),
-    ...[1, 2, 3, 4].map((l) => `.r${l}{fill:${spriteColor(theme, { level: l })};fill-opacity:.55;stroke:${ink};stroke-width:1;stroke-linejoin:round;stroke-opacity:.9}`),
+    `.rd{fill-opacity:.55;stroke:${ink};stroke-width:1;stroke-linejoin:round;stroke-opacity:.9}`,
     `.rock{fill-opacity:.5;stroke:${ink};stroke-width:1.3;stroke-linejoin:round}`,
     `.fl{fill:${ink};opacity:0}`,
     `.halo{fill:none;stroke:${ink};stroke-width:4.4;stroke-opacity:.28;stroke-linejoin:round;stroke-linecap:round}`,
@@ -1465,11 +1531,8 @@ function renderAsteroids(ctx, play) {
       ...body,
       score,
       ...debris,
-      `<g${glow}>${rocksOut.join("")}</g>`,
-      `<g${glow}>${sparks.join("")}</g>`,
-      `<g${glow}>${bulletsOut.join("")}</g>`,
-      `<g${glow}>${saucerOut}${rings.join("")}</g>`,
-      `<g${glow}>${ship}</g>`,
+      // One glow group: each filtered group blurs the whole canvas area on every frame.
+      `<g${glow}>${rocksOut.join("")}${sparks.join("")}${bulletsOut.join("")}${saucerOut}${rings.join("")}${ship}</g>`,
       text
     ].join("")
   };
@@ -1802,6 +1865,28 @@ function simulateBomberman(grid, rng) {
 // src/games/bomberman.ts
 var OUTLINE = "#1b1f3b";
 var TARGET_PLAY = 58;
+var DEBRIS = "M-1-7h2v2h-2zM5-5h2v2h-2zM6-1h2v2h-2zM4 4h2v2h-2zM-1 5h2v2h-2zM-6 4h2v2h-2zM-8-1h2v2h-2zM-6-5h2v2h-2z";
+var BOMB_CENTER = [0.1, -1.6];
+var Pool = class {
+  slots = [];
+  idle;
+  constructor(idle) {
+    this.idle = idle;
+  }
+  add(key, start, end, layers) {
+    let slot = this.slots.find((s) => s.key === key && s.end <= start);
+    if (!slot) {
+      slot = { key, end: 0, layers: this.idle.map((css) => [[0, css]]) };
+      this.slots.push(slot);
+    }
+    const open = slot;
+    layers.forEach((frames, i) => open.layers[i].push([start, this.idle[i]], ...frames, [end, this.idle[i]]));
+    slot.end = end;
+  }
+  markup(tl, draw) {
+    return this.slots.map((s) => draw(s.key, s.layers.map((frames) => tl.track(frames)))).join("");
+  }
+};
 function luminance(hex) {
   const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
@@ -1835,74 +1920,6 @@ function render(ctx) {
     const mortar = luminance(fill) < 0.3 ? mix(fill, "#ffffff", 0.22) : mix(fill, "#000000", 0.32);
     defs.push(`<path id="bk${level}" d="M0 4H12M0 8H12M6 0V4M3 4V8M9 4V8M6 8V12" stroke="${mortar}" stroke-width="1" fill="none"/>`);
   }
-  defs.push(`<path id="deb" d="M-1-7h2v2h-2zM5-5h2v2h-2zM6-1h2v2h-2zM4 4h2v2h-2zM-1 5h2v2h-2zM-6 4h2v2h-2zM-8-1h2v2h-2zM-6-5h2v2h-2z"/>`);
-  const burstKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.45) rotate(0deg)"],
-    [0.4, "opacity:0;transform:scale(1.9) rotate(40deg)"],
-    [duration, "opacity:0;transform:scale(1.9) rotate(40deg)"]
-  ]);
-  const flashKf = tl.keyframes([
-    [0, "opacity:.95;transform:scale(.3)"],
-    [0.22, "opacity:0;transform:scale(1.5)"],
-    [duration, "opacity:0;transform:scale(1.5)"]
-  ]);
-  const ringKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.2)"],
-    [0.55, "opacity:0;transform:scale(2.6)"],
-    [duration, "opacity:0;transform:scale(2.6)"]
-  ]);
-  const bigRingKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.2)"],
-    [0.8, "opacity:0;transform:scale(4.2)"],
-    [duration, "opacity:0;transform:scale(4.2)"]
-  ]);
-  const popKf = tl.keyframes([
-    [0, "opacity:0;transform:translateY(0px)"],
-    [0.08, "opacity:1;transform:translateY(-2px)"],
-    [0.9, "opacity:1;transform:translateY(-9px)"],
-    [1.2, "opacity:0;transform:translateY(-11px)"],
-    [duration, "opacity:0;transform:translateY(-11px)"]
-  ]);
-  const flame = FLAME * dt;
-  const flameKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(1.18)"],
-    [dt, "opacity:1;transform:scale(1)"],
-    [flame - dt * 0.8, "opacity:1;transform:scale(1)"],
-    [flame, "opacity:0;transform:scale(.92)"],
-    [duration, "opacity:0;transform:scale(.92)"]
-  ]);
-  const flameMidKf = tl.keyframes([
-    [0, "opacity:1"],
-    [dt * 2.5, "opacity:1"],
-    [flame - dt * 0.4, "opacity:0"],
-    [duration, "opacity:0"]
-  ]);
-  const flameCoreKf = tl.keyframes([
-    [0, "opacity:1"],
-    [dt * 0.9, "opacity:1"],
-    [dt * 1.3, "opacity:0"],
-    [dt * 2, "opacity:0"],
-    [dt * 2, "opacity:.9"],
-    [dt * 2.6, "opacity:0"],
-    [duration, "opacity:0"]
-  ]);
-  const bombLife = /* @__PURE__ */ new Map();
-  const bombKf = (life) => {
-    const key = Math.round(life * 1e3);
-    let name = bombLife.get(key);
-    if (!name) {
-      name = tl.keyframes([
-        [0, "opacity:0;transform:scale(.4)"],
-        [1e-3, "opacity:1;transform:scale(.55)"],
-        [0.12, "opacity:1;transform:scale(1)"],
-        [life, "opacity:1;transform:scale(1)"],
-        [life + 1e-3, "opacity:0;transform:scale(1)"],
-        [duration, "opacity:0;transform:scale(1)"]
-      ]);
-      bombLife.set(key, name);
-    }
-    return name;
-  };
   const floor = [];
   const tiles = [];
   for (let i = 0; i < cols * rows; i++) {
@@ -1913,7 +1930,9 @@ function render(ctx) {
     const [cx, cy] = cellCenter(layout, x, y);
     floor.push(`<rect x="${fmt(cx - 6)}" y="${fmt(cy - 6)}" width="12" height="12" rx="2.4" fill="${theme.empty}" opacity=".5"/>`);
   }
+  const glow = (inner) => theme.glow > 0 ? `<g${glowAttr(theme)}>${inner}</g>` : inner;
   const blocks = [];
+  const doomed = /* @__PURE__ */ new Map();
   for (const column of grid.cells) {
     for (const cell of column) {
       if (!cell) continue;
@@ -1921,87 +1940,176 @@ function render(ctx) {
       if (cell.level === 0) continue;
       const [cx, cy] = cellCenter(layout, cell.x, cell.y);
       const fill = levelColor(theme, cell);
-      const te = cellSet.get(cell);
       const body2 = `<rect x="${fmt(cx - 6)}" y="${fmt(cy - 6)}" width="12" height="12" rx="${layout.radius}" fill="${fill}"/><use href="#bk${cell.level}" x="${fmt(cx - 6)}" y="${fmt(cy - 6)}"/>`;
+      const te = cellSet.get(cell);
       if (te === void 0) {
-        blocks.push(`<g>${body2}</g>`);
+        blocks.push(body2);
         continue;
       }
-      const rest = "opacity:1;transform:scale(1)";
-      const cls = tl.track([
-        [0, rest],
-        [te, rest],
-        [te + 0.03, "opacity:1;transform:scale(1.22)"],
-        [te + 0.15, "opacity:0;transform:scale(.4)"],
-        [restore, "opacity:0;transform:scale(1)"],
-        [fadeEnd, rest]
-      ]);
-      blocks.push(`<g class="c ${cls}">${body2}</g>`);
+      const group = doomed.get(te);
+      if (group) group.push(body2);
+      else doomed.set(te, [body2]);
     }
   }
-  const debris = [];
-  for (const b of sim.breaks) {
+  for (const [te, bodies] of [...doomed].sort((a, b) => a[0] - b[0])) {
+    const cls = tl.track([
+      [0, "opacity:1"],
+      [te, "opacity:1"],
+      [te, "opacity:0"],
+      [restore, "opacity:0"],
+      [fadeEnd, "opacity:1"]
+    ]);
+    blocks.push(`<g class="${cls}">${bodies.join("")}</g>`);
+  }
+  const byTick = [...sim.breaks].sort((a, b) => a.tick - b.tick);
+  const crumbles = new Pool(["opacity:0;transform:translate(0px,0px) scale(1)"]);
+  const debris = new Pool([`fill:${spriteColor(theme, { level: 1 })};opacity:0;transform:translate(0px,0px) scale(1.9) rotate(40deg)`]);
+  const flashes = new Pool(["opacity:0;transform:translate(0px,0px) scale(1.5)"]);
+  for (const b of byTick) {
     const [cx, cy] = px(b.idx);
     const t = at(b.tick);
+    const rest = "opacity:1;" + translate(cx, cy, "scale(1)");
+    crumbles.add(String(b.cell.level), t, t + 0.15, [
+      [
+        [t, rest],
+        [t + 0.03, "opacity:1;" + translate(cx, cy, "scale(1.22)")],
+        [t + 0.15, "opacity:0;" + translate(cx, cy, "scale(.4)")]
+      ]
+    ]);
     const color = spriteColor(theme, b.cell);
-    debris.push(
-      `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><use href="#deb" fill="${color}" class="${tl.useKeyframes(burstKf, t)}"/><circle r="7" fill="#fff" class="${tl.useKeyframes(flashKf, t)}"/></g>`
-    );
+    debris.add("", t, t + 0.4, [
+      [
+        [t, `fill:${color};opacity:1;` + translate(cx, cy, "scale(.45) rotate(0deg)")],
+        [t + 0.4, `fill:${color};opacity:0;` + translate(cx, cy, "scale(1.9) rotate(40deg)")]
+      ]
+    ]);
+    flashes.add("", t, t + 0.22, [
+      [
+        [t, "opacity:.95;" + translate(cx, cy, "scale(.3)")],
+        [t + 0.22, "opacity:0;" + translate(cx, cy, "scale(1.5)")]
+      ]
+    ]);
   }
+  blocks.push(
+    crumbles.markup(tl, (level, [cls]) => {
+      const fill = theme.levels[Number(level) - 1];
+      return `<g class="${cls}"><rect x="-6" y="-6" width="12" height="12" rx="${layout.radius}" fill="${fill}"/><use href="#bk${level}" x="-6" y="-6"/></g>`;
+    })
+  );
+  const debrisMarkup = [
+    debris.markup(tl, (_, [cls]) => `<path d="${DEBRIS}" class="${cls}"/>`),
+    flashes.markup(tl, (_, [cls]) => `<circle r="7" fill="#fff" class="${cls}"/>`)
+  ].join("");
   const items = [];
-  const popups = [];
-  const itemRings = [];
+  const popups = new Pool(["opacity:0;transform:translate(0px,0px)"]);
+  const itemRings = new Pool(["opacity:0;transform:translate(0px,0px) scale(2.6)"]);
+  const taken = [...sim.items].filter((i) => i.taken !== null).sort((a, b) => a.taken - b.taken);
   for (const item of sim.items) {
     const [cx, cy] = px(item.idx);
     const born = at(item.revealed);
-    const taken = item.taken === null ? restore : at(item.taken);
+    const gone = item.taken === null ? restore : at(item.taken);
     const cls = tl.track([
       [0, "opacity:0;transform:scale(.3)"],
       [born, "opacity:0;transform:scale(.3)"],
       [born + 0.12, "opacity:1;transform:scale(1.25)"],
       [born + 0.3, "opacity:1;transform:scale(1)"],
-      [taken, "opacity:1;transform:scale(1)"],
-      [taken + 0.18, "opacity:0;transform:scale(1.8)"],
+      [gone, "opacity:1;transform:scale(1)"],
+      [gone + 0.18, "opacity:0;transform:scale(1.8)"],
       [duration, "opacity:0;transform:scale(1.8)"]
     ]);
-    items.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="c ${cls}"><g class="bob">${powerIcon(item.kind, pal)}</g></g></g>`);
-    if (item.taken !== null) {
-      const label = pixelText(item.kind === "fire" ? "FIRE UP" : "BOMB UP", 1);
-      const lx = Math.min(Math.max(cx - label.width / 2, 12), layout.width - 12 - label.width);
-      const ly = cy < 60 ? cy + 12 : cy - 24;
-      popups.push(
-        `<g transform="translate(${fmt(lx)} ${fmt(ly)})"><path d="${label.d}" fill="#ffffff" stroke="${OUTLINE}" stroke-width="2" stroke-linejoin="round" paint-order="stroke" class="${tl.useKeyframes(popKf, taken)}"/></g>`
-      );
-      itemRings.push(
-        `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><circle r="8" fill="none" stroke="${item.kind === "fire" ? pal.flameMid : theme.accent}" stroke-width="2" class="${tl.useKeyframes(ringKf, taken)}"/></g>`
-      );
-    }
+    items.push(glow(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="c ${cls}"><g class="bob">${powerIcon(item.kind, pal)}</g></g></g>`));
   }
-  const bombs = [];
-  for (const p of sim.plants) {
+  for (const item of taken) {
+    const [cx, cy] = px(item.idx);
+    const t = at(item.taken);
+    const label = pixelText(item.kind === "fire" ? "FIRE UP" : "BOMB UP", 1);
+    const lx = Math.min(Math.max(cx - label.width / 2, 12), layout.width - 12 - label.width);
+    const ly = cy < 60 ? cy + 12 : cy - 24;
+    popups.add(label.d, t, t + 1.2, [
+      [
+        [t, "opacity:0;" + translate(lx, ly)],
+        [t + 0.08, "opacity:1;" + translate(lx, ly - 2)],
+        [t + 0.9, "opacity:1;" + translate(lx, ly - 9)],
+        [t + 1.2, "opacity:0;" + translate(lx, ly - 11)]
+      ]
+    ]);
+    itemRings.add(item.kind === "fire" ? pal.flameMid : theme.accent, t, t + 0.55, [
+      [
+        [t, "opacity:1;" + translate(cx, cy, "scale(.2)")],
+        [t + 0.55, "opacity:0;" + translate(cx, cy, "scale(2.6)")]
+      ]
+    ]);
+  }
+  const popupMarkup = popups.markup(
+    tl,
+    (d, [cls]) => `<path d="${d}" fill="#ffffff" stroke="${OUTLINE}" stroke-width="2" stroke-linejoin="round" paint-order="stroke" class="${cls}"/>`
+  );
+  const bombs = new Pool(["opacity:0;transform:translate(0px,0px) scale(1)"]);
+  const bombCss = (cx, cy, scale, opacity) => `opacity:${opacity};` + translate(cx + BOMB_CENTER[0] * (1 - scale), cy + BOMB_CENTER[1] * (1 - scale), `scale(${scale})`);
+  for (const p of [...sim.plants].sort((a, b) => a.tick - b.tick)) {
     const [cx, cy] = px(p.idx);
+    const t = at(p.tick);
     const life = (p.explode - p.tick) * dt;
-    const cls = tl.useKeyframes(bombKf(life), at(p.tick));
-    bombs.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="c ${cls}"><g class="pulse">${bombShape(pal)}</g></g></g>`);
+    bombs.add("", t, t + life + 1e-3, [
+      [
+        [t, bombCss(cx, cy, 0.4, 0)],
+        [t + 1e-3, bombCss(cx, cy, 0.55, 1)],
+        [t + 0.12, bombCss(cx, cy, 1, 1)],
+        [t + life, bombCss(cx, cy, 1, 1)],
+        [t + life + 1e-3, bombCss(cx, cy, 1, 0)]
+      ]
+    ]);
   }
+  const bombMarkup = bombs.markup(tl, (_, [cls]) => `<g class="${cls}"${glowAttr(theme)}><g class="pulse">${bombShape(pal)}</g></g>`);
+  const flame = FLAME * dt;
+  const blasts = new Pool([
+    "opacity:0;transform:translate(0px,0px) scale(.92)",
+    "opacity:0",
+    "opacity:0"
+  ]);
   const lastBlastTick = Math.max(...sim.blasts.map((b) => b.tick), 0);
-  const blasts = [];
-  const bigRings = [];
-  for (const b of sim.blasts) {
+  const bigRings = new Pool(["opacity:0;transform:translate(0px,0px) scale(4.2)"]);
+  for (const b of [...sim.blasts].sort((a, c) => a.tick - c.tick)) {
     const [cx, cy] = px(b.idx);
     const t = at(b.tick);
-    const outer = crossShape(b.arms, 6, layout.pitch, pal.flameOuter, pal.flameStroke === "none" ? "" : ` stroke="${pal.flameStroke}" stroke-width="1"`);
-    const mid = crossShape(b.arms, 3.8, layout.pitch, pal.flameMid, "");
-    const core = crossShape(b.arms, 1.7, layout.pitch, pal.flameCore, "");
-    blasts.push(
-      `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><g class="${tl.useKeyframes(flameKf, t)}">${outer}<g class="${tl.useKeyframes(flameMidKf, t)}">${mid}</g><g class="${tl.useKeyframes(flameCoreKf, t)}">${core}</g></g></g>`
-    );
+    blasts.add(b.arms.join(","), t, t + flame, [
+      [
+        [t, "opacity:1;" + translate(cx, cy, "scale(1.18)")],
+        [t + dt, "opacity:1;" + translate(cx, cy, "scale(1)")],
+        [t + flame - dt * 0.8, "opacity:1;" + translate(cx, cy, "scale(1)")],
+        [t + flame, "opacity:0;" + translate(cx, cy, "scale(.92)")]
+      ],
+      [
+        [t, "opacity:1"],
+        [t + dt * 2.5, "opacity:1"],
+        [t + flame - dt * 0.4, "opacity:0"]
+      ],
+      [
+        [t, "opacity:1"],
+        [t + dt * 0.9, "opacity:1"],
+        [t + dt * 1.3, "opacity:0"],
+        [t + dt * 2, "opacity:0"],
+        [t + dt * 2, "opacity:.9"],
+        [t + dt * 2.6, "opacity:0"]
+      ]
+    ]);
     if (b.tick === lastBlastTick) {
-      bigRings.push(
-        `<g transform="translate(${fmt(cx)} ${fmt(cy)})"><circle r="9" fill="none" stroke="${theme.accent}" stroke-width="2.4" class="${tl.useKeyframes(bigRingKf, t)}"/></g>`
-      );
+      bigRings.add("", t, t + 0.8, [
+        [
+          [t, "opacity:1;" + translate(cx, cy, "scale(.2)")],
+          [t + 0.8, "opacity:0;" + translate(cx, cy, "scale(4.2)")]
+        ]
+      ]);
     }
   }
+  const blastMarkup = blasts.markup(tl, (key, [flameCls, midCls, coreCls]) => {
+    const arms = key.split(",").map(Number);
+    const outer = crossShape(arms, 6, layout.pitch, pal.flameOuter, pal.flameStroke === "none" ? "" : ` stroke="${pal.flameStroke}" stroke-width="1"`);
+    const mid = crossShape(arms, 3.8, layout.pitch, pal.flameMid, "");
+    const core = crossShape(arms, 1.7, layout.pitch, pal.flameCore, "");
+    return `<g class="${flameCls}"${glowAttr(theme)}>${outer}<g class="${midCls}">${mid}</g><g class="${coreCls}">${core}</g></g>`;
+  });
+  const ringMarkup = bigRings.markup(tl, (_, [cls]) => glow(`<circle r="9" fill="none" stroke="${theme.accent}" stroke-width="2.4" class="${cls}"/>`)) + itemRings.markup(tl, (color, [cls]) => glow(`<circle r="8" fill="none" stroke="${color}" stroke-width="2" class="${cls}"/>`));
   const start = px(0);
   const path = sim.path.slice();
   while (path.length < sim.ticks + 1) path.push(path[path.length - 1]);
@@ -2090,13 +2198,13 @@ function render(ctx) {
     `<g>${floor.join("")}</g>`,
     `<g>${tiles.join("")}</g>`,
     `<g>${blocks.join("")}</g>`,
-    `<g${glowAttr(theme)}>${items.join("")}</g>`,
-    `<g${glowAttr(theme)}>${bombs.join("")}</g>`,
-    `<g${glowAttr(theme)}>${blasts.join("")}</g>`,
-    `<g>${debris.join("")}</g>`,
-    `<g${glowAttr(theme)}>${bigRings.join("")}${itemRings.join("")}</g>`,
+    items.join(""),
+    bombMarkup,
+    blastMarkup,
+    debrisMarkup,
+    ringMarkup,
     `<g class="${posCls}"><g class="${fadeCls}"><g class="${hopCls}"${glowAttr(theme)}>${sprite2}</g></g></g>`,
-    popups.join(""),
+    popupMarkup,
     hudMarkup,
     endCard
   ].join("\n");
@@ -2417,6 +2525,7 @@ function pacePlay(sim) {
 }
 var FLASH_TIME = 0.08;
 var CHIP_LIFE = 0.6;
+var CHIP_GROUPS = 30;
 var CHIP_GRAVITY = 300;
 var EMBERS = ["#ffd23f", "#ff9a2a"];
 var CHIPS = [
@@ -2429,18 +2538,37 @@ var CHIPS = [
   { vx: -44, vy: -48, size: 2.8, spin: 0, spark: true },
   { vx: 46, vy: -54, size: 2.8, spin: 0, spark: true }
 ];
-function chipFrames(c) {
+function chipKeyframes(name, c, life) {
   const steps = 7;
   const out = [];
   for (let k = 0; k <= steps; k++) {
-    const u = k / steps * CHIP_LIFE;
-    const fade = Math.min(1, (CHIP_LIFE - u) / (CHIP_LIFE * 0.5));
+    const u = k / steps * life;
+    const fade = Math.min(1, (life - u) / (life * 0.5));
     const x = c.vx * u;
     const y = c.vy * u + 0.5 * CHIP_GRAVITY * u * u;
-    out.push([u, `opacity:${fmt(fade)};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(c.spin * u)}deg) scale(${fmt(0.55 + 0.45 * fade)})`]);
+    out.push(`${Math.round(k / steps * 1e5) / 1e3}%{opacity:${fmt(fade)};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(c.spin * u)}deg) scale(${fmt(0.55 + 0.45 * fade)})}`);
   }
-  return out;
+  return `@keyframes ${name}{${out.join("")}}`;
 }
+var Pool2 = class {
+  slots = [];
+  idle;
+  constructor(idle) {
+    this.idle = idle;
+  }
+  add(key, start, end, frames) {
+    let slot = this.slots.find((s) => s.key === key && s.end <= start);
+    if (!slot) {
+      slot = { key, end: 0, frames: [[0, this.idle]] };
+      this.slots.push(slot);
+    }
+    slot.frames.push([start, this.idle], ...frames, [end, this.idle]);
+    slot.end = end;
+  }
+  markup(tl, draw) {
+    return this.slots.map((s) => draw(s.key, tl.track(s.frames))).join("");
+  }
+};
 var CRACKS = [
   [[7, 0], [4.5, 4], [7.5, 6.5], [4, 9], [6, 12]],
   [[3, 0], [6, 3.5], [4, 6], [8, 8.5], [7, 12]],
@@ -2456,6 +2584,29 @@ function smoothGlide(t0, x0, t1, x1) {
   }
   out.push([t1, x1]);
   return out;
+}
+function erf(x) {
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return x < 0 ? -y : y;
+}
+function haloStrokes(d, color, width, sigma) {
+  const profile = (dist) => 0.5 * (erf((dist + width / 2) / (sigma * Math.SQRT2)) - erf((dist - width / 2) / (sigma * Math.SQRT2)));
+  const step = Math.max(0.35, sigma / 3.2);
+  const targets = [];
+  for (let j = 1; ; j++) {
+    const t = profile(width / 2 + (j - 0.5) * step);
+    if (t < 0.01) break;
+    targets.push(t);
+  }
+  const out = [];
+  for (let j = targets.length - 1; j >= 0; j--) {
+    const outer = j + 1 < targets.length ? targets[j + 1] : 0;
+    const alpha = 1 - (1 - targets[j]) / (1 - outer);
+    const stroke = fmt(width + 2 * (j + 1) * step);
+    out.push(`<path d="${d}" fill="none" stroke="${color}" stroke-opacity="${Math.round(alpha * 1e3) / 1e3}" stroke-width="${stroke}" stroke-linejoin="round"/>`);
+  }
+  return out.join("");
 }
 var state = (fill, opacity, scale) => `fill:${fill};opacity:${opacity};transform:scale(${scale})`;
 function flashColor(theme) {
@@ -2481,8 +2632,9 @@ function render2(ctx) {
   const gridCy = layout.top + layout.gridHeight / 2;
   const wallBottom = court.padTop + PADDLE_H + 4;
   const parts = [];
+  const wall = `M${court.fieldL - 1.5} ${wallBottom}V${court.fieldT - 1.5}H${court.fieldR + 1.5}V${wallBottom}`;
   parts.push(
-    `<path d="M${court.fieldL - 1.5} ${wallBottom}V${court.fieldT - 1.5}H${court.fieldR + 1.5}V${wallBottom}" fill="none" stroke="${theme.accent}" stroke-width="3" stroke-linejoin="round"${glow}/>`,
+    (theme.glow > 0 ? haloStrokes(wall, theme.accent, 3, theme.glow) : "") + `<path d="${wall}" fill="none" stroke="${theme.accent}" stroke-width="3" stroke-linejoin="round"/>`,
     `<path d="M${court.fieldL + 1.5} ${wallBottom}V${court.fieldT + 1.5}H${court.fieldR - 1.5}V${wallBottom}" fill="none" stroke="${theme.ink}" stroke-opacity=".28" stroke-width="1"/>`
   );
   for (const cell of allCells(grid)) parts.push(cellRect(layout, cell, theme.empty));
@@ -2492,58 +2644,86 @@ function render2(ctx) {
     list.push(h);
     hitsByCell.set(h.cell, list);
   }
-  const chipNames = CHIPS.map((c) => tl.keyframes(chipFrames(c)));
-  const chipCss = chipNames.map((name, i) => `.c${i}{animation:${name} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`);
-  const ringName = tl.keyframes([
-    [0, "opacity:.9;transform:scale(.4)"],
-    [0.35, "opacity:0;transform:scale(2.8)"]
-  ]);
+  const cracks = new Pool2("opacity:0;transform:translate(0px,0px)");
+  const padRings = new Pool2("opacity:0;transform:translate(0px,0px) scale(2.8)");
   const bigRingName = tl.keyframes([
     [0, "opacity:1;transform:scale(.3)"],
     [0.7, "opacity:0;transform:scale(9)"]
   ]);
   const delayFor = (t) => `--d:${fmt(-(duration - t))}s`;
-  const cracks = [];
-  const pops = [];
+  const flights = [];
+  const crackEvents = [];
   const clears = [];
   for (const cell of activeCells(grid)) {
     const hits = hitsByCell.get(cell) ?? [];
     const top = levelColor(theme, cell);
     const worn = levelColor(theme, { ...cell, level: cell.level - 1 });
-    const frames2 = [[0, state(top, 1, 1)]];
+    const frames = [[0, state(top, 1, 1)]];
     let last = top;
     let crackAt = -1;
     for (const h of hits) {
       const t = at(h.t);
       if (!h.final) {
-        frames2.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + FLASH_TIME, state(worn, 1, 1)]);
+        frames.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + FLASH_TIME, state(worn, 1, 1)]);
         last = worn;
         crackAt = t;
       } else {
-        frames2.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + 0.06, state(flash, 1, 1.25)], [t + 0.061, state(flash, 0, 1.25)]);
+        frames.push([t, state(last, 1, 1)], [t, state(flash, 1, 1)], [t + 0.06, state(flash, 1, 1.25)], [t + 0.061, state(flash, 0, 1.25)]);
         clears.push({ t, cell });
         const cx = layout.left + cell.x * layout.pitch + layout.cell / 2;
         const cy = layout.top + cell.y * layout.pitch + layout.cell / 2;
         const burning = sim.fire !== null && h.t >= sim.fire.t;
         const base = burning ? EMBERS[1] : spriteColor(theme, { level: Math.min(4, cell.level + 1) });
         const spark = burning ? EMBERS[0] : flash;
-        const chips = CHIPS.map((c, i) => {
-          const s = c.size;
-          return `<rect class="p c${i}"${c.spark ? ` fill="${spark}"` : ""} x="${fmt(-s / 2)}" y="${fmt(-s / 2)}" width="${s}" height="${s}"/>`;
-        }).join("");
-        pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})" fill="${base}" style="${delayFor(t + 0.06)}">${chips}</g>`);
+        flights.push({ start: t + 0.06, cx, cy, base, spark });
         if (crackAt >= 0 && t > crackAt + FLASH_TIME + 0.02) {
           const [ox, oy] = [layout.left + cell.x * layout.pitch, layout.top + cell.y * layout.pitch];
-          const d = CRACKS[(cell.x + cell.y * 2) % CRACKS.length].map(([x, y], i) => `${i ? "L" : "M"}${fmt(ox + x)} ${fmt(oy + y)}`).join("");
-          const cls = tl.track([[0, "opacity:0"], [crackAt + FLASH_TIME, "opacity:0"], [crackAt + FLASH_TIME + 1e-3, "opacity:1"], [t, "opacity:1"], [t + 1e-3, "opacity:0"]]);
-          cracks.push(`<path class="${cls}" d="${d}" fill="none" stroke="${theme.surface}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`);
+          crackEvents.push({ start: crackAt + FLASH_TIME, end: t + 1e-3, variant: (cell.x + cell.y * 2) % CRACKS.length, ox, oy });
         }
       }
     }
-    frames2.push([back, state(top, 0, 1)], [back + PACE.restore, state(top, 1, 1)]);
-    parts.push(cellRect(layout, cell, top, `class="b ${tl.track(frames2)}"`));
+    frames.push([back, state(top, 0, 1)], [back + PACE.restore, state(top, 1, 1)]);
+    parts.push(cellRect(layout, cell, top, `class="b ${tl.track(frames)}"`));
   }
-  parts.push(...cracks, ...pops);
+  for (const c of crackEvents.sort((a, b) => a.start - b.start)) {
+    const pos2 = translate(c.ox, c.oy);
+    cracks.add(String(c.variant), c.start, c.end, [
+      [c.start, "opacity:0;" + pos2],
+      [c.start + 1e-3, "opacity:1;" + pos2],
+      [c.end - 1e-3, "opacity:1;" + pos2],
+      [c.end, "opacity:0;" + pos2]
+    ]);
+  }
+  const loopLen = Number(fmt(duration));
+  const chipPeriod = loopLen / Math.max(1, Math.round(loopLen / CHIP_LIFE));
+  const bin = chipPeriod / CHIP_GROUPS;
+  const chipOff = "opacity:0;fill:#000;color:#000;transform:translate(0px,0px)";
+  const chipTracks = Array.from({ length: CHIP_GROUPS }, () => [[0, chipOff]]);
+  const taken = /* @__PURE__ */ new Set();
+  for (const f of flights.sort((a, b) => a.start - b.start)) {
+    let n = Math.round(f.start / bin);
+    while (taken.has(n)) n++;
+    taken.add(n);
+    const t = n * bin;
+    const on = `opacity:1;fill:${f.base};color:${f.spark};` + translate(f.cx, f.cy);
+    chipTracks[n % CHIP_GROUPS].push([t, chipOff], [t, on], [t + chipPeriod, on], [t + chipPeriod, chipOff]);
+  }
+  const chipMarkup = chipTracks.map((frames, j) => {
+    const cls = tl.track(frames);
+    const rects = CHIPS.map((c, i) => {
+      const half = fmt(-c.size / 2);
+      return `<rect class="c${i}"${c.spark ? ' fill="currentColor"' : ""} x="${half}" y="${half}" width="${c.size}" height="${c.size}"/>`;
+    }).join("");
+    return `<g class="${cls}" style="--d:${(j * bin - chipPeriod).toFixed(5)}s">${rects}</g>`;
+  }).join("");
+  parts.push(
+    cracks.markup(tl, (variant, cls) => {
+      const d = CRACKS[Number(variant)].map(([x, y], i) => `${i ? "L" : "M"}${x} ${y}`).join("");
+      return `<path class="${cls}" d="${d}" fill="none" stroke="${theme.surface}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }),
+    chipMarkup
+  );
+  const chipCss = CHIPS.map((c, i) => chipKeyframes(`cf${i}`, c, chipPeriod) + `.c${i}{animation:cf${i} ${chipPeriod.toFixed(7)}s linear infinite;animation-delay:var(--d)}`);
   const lastHit = sim.hits.length ? sim.hits[sim.hits.length - 1] : null;
   if (lastHit) {
     const t = at(lastHit.t);
@@ -2556,13 +2736,16 @@ function render2(ctx) {
     );
   }
   const ringCss = [
-    `.pr{animation:${ringName} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`,
     `.bring{animation:${bigRingName} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`
   ];
-  const padRings = [];
   for (const [t, x, y] of sim.ball.slice(1)) {
     if (y !== startY) continue;
-    padRings.push(`<ellipse class="p pr" cx="${fmt(x)}" cy="${fmt(court.padTop)}" rx="7" ry="1.6" fill="none" stroke="${theme.accent}" stroke-width="1.5" style="${delayFor(at(t))}"/>`);
+    const t0 = at(t);
+    const at0 = (scale, opacity) => `opacity:${opacity};` + translate(x, court.padTop, `scale(${scale})`);
+    padRings.add("", t0, t0 + 0.35, [
+      [t0, at0(0.4, 0.9)],
+      [t0 + 0.35, at0(2.8, 0)]
+    ]);
   }
   const paddleFrames = [];
   const pos = (x) => translate(x, court.padTop);
@@ -2602,7 +2785,9 @@ function render2(ctx) {
   }
   paddleFrames.push([duration, pos(court.startX)]);
   ballFrames.push([duration, ballPos(court.startX, startY)]);
-  parts.push(...padRings);
+  parts.push(
+    padRings.markup(tl, (_, cls) => `<ellipse class="${cls}" rx="7" ry="1.6" fill="none" stroke="${theme.accent}" stroke-width="1.5"/>`)
+  );
   const padRaw = tl.track(paddleFrames);
   const padSquash = tl.track(squash, "linear");
   const padW = PADDLE_HALF * 2;
@@ -2650,8 +2835,8 @@ function render2(ctx) {
   const css = [
     ".b,.p,.sq,.ring{transform-box:fill-box;transform-origin:center}",
     ".sq{transform-origin:50% 100%}",
-    ...chipCss,
     ...ringCss,
+    ...chipCss,
     tl.css()
   ].join("\n");
   return { width: layout.width, height: layout.height, css, defs: glowDefs(theme), body: parts.join("\n") };
@@ -2664,6 +2849,8 @@ var Bursts = class {
   prefix;
   rules = [];
   shapes = [];
+  lives = /* @__PURE__ */ new Map();
+  played = [];
   constructor(duration, prefix = "fx") {
     this.duration = duration;
     this.prefix = prefix;
@@ -2672,6 +2859,7 @@ var Bursts = class {
     const d = this.duration;
     const pct = (s) => Math.round(Math.min(s, d) / d * 1e6) / 1e4;
     const name = `${this.prefix}-${id}`;
+    this.lives.set(id, shape.life);
     const rest = "opacity:0;transform:scale(1.12)";
     this.rules.push(
       `@keyframes ${name}{0%{opacity:1;transform:scale(.25);animation-timing-function:cubic-bezier(.1,.8,.3,1)}${pct(shape.life * 0.55)}%{opacity:1;transform:scale(.9);animation-timing-function:ease-in}${pct(shape.life)}%{${rest}}100%{${rest}}}.${name}{animation:${name} ${fmt(d)}s linear infinite}`
@@ -2695,6 +2883,37 @@ var Bursts = class {
     const delay = shift === 0 ? "0s" : `-${fmt(Math.round((this.duration - shift) * 1e3) / 1e3)}s`;
     const name = `${this.prefix}-${id}`;
     return `<use class="${name}" href="#${name}" x="${fmt(x)}" y="${fmt(y)}" style="animation-delay:${delay};transform-origin:${fmt(x)}px ${fmt(y)}px;color:${color}"/>`;
+  }
+  /**
+   * Queues a burst for markup(), which plays all of them on a few shared elements. Prefer this to use():
+   * every element costs style work on every frame, even while it waits invisibly for its moment.
+   */
+  play(id, x, y, t, color) {
+    this.played.push({ id, x, y, t, color });
+  }
+  /** Elements that play every queued burst, reusing one per burst shape whenever the last one has finished. */
+  markup(tl) {
+    const slots = [];
+    for (const b of [...this.played].sort((p, q) => p.t - q.t)) {
+      const life = this.lives.get(b.id);
+      if (life === void 0) throw new Error(`Unknown burst "${b.id}"`);
+      const look = (scale, opacity, ease = "") => `opacity:${opacity};${translate(b.x, b.y, `scale(${scale})`)};color:${b.color}${ease ? `;animation-timing-function:${ease}` : ""}`;
+      const done = look(1.12, 0);
+      let slot = slots.find((s) => s.id === b.id && s.free <= b.t);
+      if (!slot) {
+        slot = { id: b.id, free: 0, frames: [[0, done]], last: done };
+        slots.push(slot);
+      }
+      slot.frames.push(
+        [b.t, slot.last],
+        [b.t, look(0.25, 1, "cubic-bezier(.1,.8,.3,1)")],
+        [b.t + life * 0.55, look(0.9, 1, "ease-in")],
+        [b.t + life, done]
+      );
+      slot.free = b.t + life;
+      slot.last = done;
+    }
+    return slots.map((s) => `<use class="${tl.track(s.frames)}" href="#${this.prefix}-${s.id}"/>`).join("");
   }
   defs() {
     return this.shapes.join("");
@@ -3202,10 +3421,25 @@ function mushroomStrip(theme, level, p, dark) {
   const colors = { C: cap, S: mix2(cap, "#ffffff", 0.7), T: mix2(cap, "#ffffff", dark ? 0.55 : 0.3) };
   return [MUSHROOM_ROWS.full, MUSHROOM_ROWS.nibbled, MUSHROOM_ROWS.bitten].map((rows, i) => `<g transform="translate(${i * STRIP_PITCH} 0)">${sprite(rows, colors, MUSHROOM_SCALE, p)}</g>`).join("");
 }
-function flicker(frames2, period) {
-  return frames2.map(
+function flicker(frames, period) {
+  return frames.map(
     (f, i) => `<g opacity="${i === 0 ? 1 : 0}">${f}<animate attributeName="opacity" values="${i === 0 ? "1;0" : "0;1"}" calcMode="discrete" dur="${period}s" repeatCount="indefinite"/></g>`
   ).join("");
+}
+function playPooled2(tl, events) {
+  const hold = ";animation-timing-function:step-end";
+  const slots = [];
+  for (const ev of [...events].sort((a, b) => a.from - b.from)) {
+    const frames = ev.frames.map((f, i) => i === ev.frames.length - 1 ? [f[0], f[1] + hold] : f);
+    let slot = slots.find((s) => s.free <= ev.from);
+    if (!slot) {
+      slot = { free: 0, frames: [[0, frames[frames.length - 1][1]]], make: ev.make };
+      slots.push(slot);
+    }
+    slot.frames.push(...frames);
+    slot.free = ev.to;
+  }
+  return slots.map((s) => s.make(tl.track(s.frames)));
 }
 function render3(ctx) {
   const { grid, theme } = ctx;
@@ -3250,70 +3484,59 @@ function render3(ctx) {
   const bulletDef = `<g id="bl"><rect x="-2.4" y="-1" width="4.8" height="11" rx="2.4" fill="${pal.bullet}" fill-opacity="${dark ? 0.28 : 0.22}"/><rect x="-1" y="0" width="2" height="9" rx="1" fill="${pal.bullet}"/></g>`;
   const body = [];
   const clears = [];
-  const css = [];
   const mushroomMarkup = [];
   const bulletMarkup = [];
   const segmentMarkup = [];
   const pestMarkup = [];
-  const burstMarkup = [];
   const popupMarkup = [];
   let playerMarkup = "";
-  const shift = (t) => {
-    const s = (t % duration + duration) % duration;
-    return s === 0 ? "0s" : `-${fmt(Math.round((duration - s) * 1e3) / 1e3)}s`;
-  };
   if (sim) {
     const stripCss = (state2, opacity) => `opacity:${opacity};transform:translate(${-state2 * STRIP_PITCH}px,0)`;
     for (const m of sim.mushrooms) {
-      const frames2 = [];
+      const frames = [];
       const first = m.day ? 0 : GONE;
-      frames2.push([0, stripCss(first, 1)]);
+      frames.push([0, stripCss(first, 1)]);
       let state2 = first;
-      if (!m.day) frames2.push([T(m.born), stripCss(GONE, 1)]);
+      if (!m.day) frames.push([T(m.born), stripCss(GONE, 1)]);
       for (const ev of m.states) {
         const at = T(ev.t);
-        frames2.push([at, stripCss(state2, 1)], [at, stripCss(ev.state, 1)]);
+        frames.push([at, stripCss(state2, 1)], [at, stripCss(ev.state, 1)]);
         state2 = ev.state;
       }
       if (m.day) {
-        frames2.push([restore, stripCss(GONE, 0)], [restore, stripCss(0, 0)], [restore + PACE.restore, stripCss(0, 1)]);
+        frames.push([restore, stripCss(GONE, 0)], [restore, stripCss(0, 0)], [restore + PACE.restore, stripCss(0, 1)]);
       }
-      const cls = tl.track(frames2);
+      const cls = tl.track(frames);
       mushroomMarkup.push(
         `<g transform="translate(${fmt(cellX(m.col))} ${fmt(cellY(m.row))})" clip-path="url(#mclip)"><use class="${cls}" href="#st${m.level}"/></g>`
       );
       if (m.day) clears.push({ t: T(m.states[m.states.length - 1].t), cell: m.day });
     }
-    const flights = /* @__PURE__ */ new Map();
-    const flightClass = (d, flight) => {
-      const key = `${Math.round(d * 2)}:${Math.round(flight * 500)}`;
-      let cls = flights.get(key);
-      if (!cls) {
-        const rest = `opacity:0;transform:translateY(${fmt(-d)}px)`;
-        const name = tl.keyframes([
-          [0, "opacity:1;transform:translateY(0)"],
-          [flight, `opacity:1;transform:translateY(${fmt(-d)}px)`],
-          [flight + 1e-3, rest]
-        ]);
-        cls = `bf${flights.size}`;
-        css.push(`.${cls}{animation:${name} ${fmt(duration)}s linear infinite}`);
-        flights.set(key, cls);
-      }
-      return cls;
-    };
-    for (const b of sim.bullets) {
-      const cls = flightClass(b.y0 - b.y1, (b.t1 - b.t0) * scale);
-      bulletMarkup.push(`<use class="${cls}" href="#bl" x="${fmt(b.x)}" y="${fmt(b.y0)}" style="animation-delay:${shift(T(b.t0))}"/>`);
-    }
+    const bulletEvents = sim.bullets.map((b) => {
+      const from = T(b.t0);
+      const to = from + (b.t1 - b.t0) * scale;
+      return {
+        key: "bullet",
+        from,
+        to: to + 1e-3,
+        make: (cls) => `<use class="${cls}" href="#bl"/>`,
+        frames: [
+          [from, `opacity:1;${translate(b.x, b.y0)}`],
+          [to, `opacity:1;${translate(b.x, b.y1)}`],
+          [to + 1e-3, `opacity:0;${translate(b.x, b.y1)}`]
+        ]
+      };
+    });
+    bulletMarkup.push(...playPooled2(tl, bulletEvents));
     for (const s of sim.segments) {
       if (s.died === null) throw new Error("segment survived");
       const pts2 = simplify(s.way.map(([t, x, y]) => [T(t), x, y]));
       const start = pts2[0];
       const stop = pts2[pts2.length - 1];
-      const frames2 = [[0, `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:1;${translate(start[1], start[2])}`]];
-      for (const [t, x, y] of pts2) frames2.push([t, `opacity:1;${translate(x, y)}`]);
-      frames2.push([stop[0], `opacity:0;${translate(stop[1], stop[2])}`]);
-      const pos = tl.track(frames2);
+      const frames = [[0, `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:1;${translate(start[1], start[2])}`]];
+      for (const [t, x, y] of pts2) frames.push([t, `opacity:1;${translate(x, y)}`]);
+      frames.push([stop[0], `opacity:0;${translate(stop[1], stop[2])}`]);
+      const pos = tl.track(frames);
       let headLayer = "";
       if (s.heads.length) {
         const hf = [[0, "opacity:0"]];
@@ -3334,14 +3557,14 @@ function render3(ctx) {
       const pts2 = simplify(p.way.map(([t, x, y]) => [T(t), x, y]));
       const start = pts2[0];
       const stop = pts2[pts2.length - 1];
-      const frames2 = [[0, `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:1;${translate(start[1], start[2])}`]];
-      for (const [t, x, y] of pts2) frames2.push([t, `opacity:1;${translate(x, y)}`]);
-      frames2.push([stop[0], `opacity:0;${translate(stop[1], stop[2])}`]);
-      pestMarkup.push(`<g class="${tl.track(frames2)}"><use href="#${p.kind}"/></g>`);
+      const frames = [[0, `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:0;${translate(start[1], start[2])}`], [start[0], `opacity:1;${translate(start[1], start[2])}`]];
+      for (const [t, x, y] of pts2) frames.push([t, `opacity:1;${translate(x, y)}`]);
+      frames.push([stop[0], `opacity:0;${translate(stop[1], stop[2])}`]);
+      pestMarkup.push(`<g class="${tl.track(frames)}"><use href="#${p.kind}"/></g>`);
     }
     for (const e of sim.effects) {
       const color = e.kind === "chip" || e.kind === "crumble" ? spriteColor(theme, { level: e.level }) : e.kind === "big" ? pal.head : pal.body;
-      burstMarkup.push(bursts.use(e.kind, e.x, e.y, T(e.t), color));
+      bursts.play(e.kind, e.x, e.y, T(e.t), color);
     }
     for (const p of sim.popups) {
       const text = pixelText(p.text, 1.6);
@@ -3378,14 +3601,12 @@ function render3(ctx) {
     `<g>${mushroomMarkup.join("")}</g>`,
     `<g>${bulletMarkup.join("")}</g>`,
     `<g${glowAttr(theme)}>${segmentMarkup.join("")}${pestMarkup.join("")}${playerMarkup}</g>`,
-    `<g>${burstMarkup.join("")}</g>`,
+    `<g>${bursts.markup(tl)}</g>`,
     `<g>${popupMarkup.join("")}</g>`,
     bar,
     end
   );
-  return { width, height, css: `${tl.css()}
-${bursts.css()}
-${css.join("\n")}`, defs, body: body.join("\n") };
+  return { width, height, css: tl.css(), defs, body: body.join("\n") };
 }
 var centipede = { id: "centipede", title: "Centipede", render: render3 };
 
@@ -4016,6 +4237,203 @@ function playOnce(grid, rng, geo) {
   return out;
 }
 
+// src/games/galaga-sprites.ts
+import { crc32, deflateSync } from "node:zlib";
+var PX_PER_CELL = 8;
+var GLOW_PX_PER_CELL = 2;
+var OUTLINE_SAMPLES = 4;
+var toLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+var toSrgb = (c) => c <= 31308e-7 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
+var cache = /* @__PURE__ */ new Map();
+function spriteImage(rows, palette, opts, attrs = "") {
+  const key = JSON.stringify([rows, palette, opts]);
+  let markup = cache.get(key);
+  if (markup === void 0) cache.set(key, markup = render4(rows, palette, opts));
+  return `<image${attrs ? " " + attrs : ""} ${markup}`;
+}
+function render4(rows, palette, opts) {
+  const cols = Math.max(...rows.map((r) => r.length));
+  const sigmaPx = opts.sigma * (GLOW_PX_PER_CELL / opts.cell);
+  const margin = opts.sigma > 0 ? Math.ceil((sigmaPx * 3 + 1) / GLOW_PX_PER_CELL) : 1;
+  const scale = PX_PER_CELL / GLOW_PX_PER_CELL;
+  const width = (cols + margin * 2) * PX_PER_CELL;
+  const height = (rows.length + margin * 2) * PX_PER_CELL;
+  const linear = /* @__PURE__ */ new Map();
+  const colour = (hex) => {
+    let c = linear.get(hex);
+    if (!c) linear.set(hex, c = [1, 3, 5].map((i) => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255)));
+    return c;
+  };
+  const filledAt = (cx, cy) => cy >= 0 && cy < rows.length && cx >= 0 && cx < cols && rows[cy][cx] !== void 0 && rows[cy][cx] !== "." && palette[rows[cy][cx]] !== void 0;
+  const reach = opts.outline ? opts.outline.width / 2 / opts.cell : 0;
+  const nearFilled = (u, v) => {
+    for (let cy = Math.floor(v - reach); cy <= Math.floor(v + reach); cy++) {
+      for (let cx = Math.floor(u - reach); cx <= Math.floor(u + reach); cx++) {
+        if (!filledAt(cx, cy)) continue;
+        const dx = Math.max(cx - u, 0, u - (cx + 1));
+        const dy = Math.max(cy - v, 0, v - (cy + 1));
+        if (dx * dx + dy * dy <= reach * reach) return true;
+      }
+    }
+    return false;
+  };
+  const sharp = new Float32Array(width * height * 4);
+  const samples = opts.outline ? OUTLINE_SAMPLES : 1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      for (let sy = 0; sy < samples; sy++) {
+        for (let sx = 0; sx < samples; sx++) {
+          const u = (x + (sx + 0.5) / samples) / PX_PER_CELL - margin;
+          const v = (y + (sy + 0.5) / samples) / PX_PER_CELL - margin;
+          const cx = Math.floor(u);
+          const cy = Math.floor(v);
+          const hex = filledAt(cx, cy) ? palette[rows[cy][cx]] : opts.outline && nearFilled(u, v) ? opts.outline.color : null;
+          if (hex === null) continue;
+          const [lr, lg, lb] = colour(hex);
+          r += lr;
+          g += lg;
+          b += lb;
+          a += 1;
+        }
+      }
+      const i = (y * width + x) * 4;
+      const n = samples * samples;
+      sharp[i] = r / n;
+      sharp[i + 1] = g / n;
+      sharp[i + 2] = b / n;
+      sharp[i + 3] = a / n;
+    }
+  }
+  let glow = null;
+  const gw = width / scale;
+  const gh = height / scale;
+  if (opts.sigma > 0) {
+    const small = new Float32Array(gw * gh * 4);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        for (let c = 0; c < 4; c++) {
+          let sum = 0;
+          for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) sum += sharp[((y * scale + sy) * width + x * scale + sx) * 4 + c];
+          small[(y * gw + x) * 4 + c] = sum / (scale * scale);
+        }
+      }
+    }
+    glow = blur(blur(small, gw, gh, sigmaPx, true), gw, gh, sigmaPx, false);
+  }
+  const rgba = Buffer.alloc(width * height * 4);
+  const sampleGlow = (x, y, c) => {
+    const fx = Math.min(gw - 1, Math.max(0, (x + 0.5) / scale - 0.5));
+    const fy = Math.min(gh - 1, Math.max(0, (y + 0.5) / scale - 0.5));
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(gw - 1, x0 + 1);
+    const y1 = Math.min(gh - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const at = (px, py) => glow[(py * gw + px) * 4 + c];
+    return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+  };
+  for (let i = 0; i < width * height; i++) {
+    const x = i % width;
+    const y = (i - x) / width;
+    const sa = sharp[i * 4 + 3];
+    const px = [0, 1, 2, 3].map((c) => sharp[i * 4 + c] + (glow ? sampleGlow(x, y, c) * (1 - sa) : 0));
+    const a = px[3];
+    if (a < 1 / 512) continue;
+    const solid = !glow || a > 0.8;
+    for (let c = 0; c < 3; c++) {
+      const v = Math.round(Math.min(1, Math.max(0, toSrgb(px[c] / a))) * 255);
+      rgba[i * 4 + c] = solid ? v : Math.min(255, Math.round(v / 16) * 16);
+    }
+    rgba[i * 4 + 3] = solid ? Math.round(Math.min(1, a) * 255) : Math.round(a * 255 / 4) * 4;
+  }
+  const unit = opts.cell / PX_PER_CELL;
+  return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(opts.x - margin * opts.cell)}" y="${fmt(opts.y - margin * opts.cell)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
+}
+function blur(src, width, height, sigma, horizontal) {
+  const radius = Math.ceil(sigma * 3);
+  const kernel = new Float32Array(radius * 2 + 1);
+  let sum = 0;
+  for (let i = -radius; i <= radius; i++) sum += kernel[i + radius] = Math.exp(-(i * i) / (2 * sigma * sigma));
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+  const out = new Float32Array(src.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      for (let k = -radius; k <= radius; k++) {
+        const sx = horizontal ? x + k : x;
+        const sy = horizontal ? y : y + k;
+        if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+        const w = kernel[k + radius];
+        const s = (sy * width + sx) * 4;
+        for (let c = 0; c < 4; c++) out[o + c] += src[s + c] * w;
+      }
+    }
+  }
+  return out;
+}
+function png(rgba, width, height) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc32(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 6;
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  const paeth = (a, b, c) => {
+    const p = a + b - c;
+    const pa = Math.abs(p - a);
+    const pb = Math.abs(p - b);
+    const pc = Math.abs(p - c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  };
+  for (let y = 0; y < height; y++) {
+    const row = (i) => i < 0 ? 0 : rgba[y * stride + i];
+    const up = (i) => y === 0 || i < 0 ? 0 : rgba[(y - 1) * stride + i];
+    let best = Buffer.alloc(0);
+    let bestCost = Infinity;
+    let bestType = 0;
+    for (let type = 0; type < 5; type++) {
+      const line = Buffer.alloc(stride);
+      let cost = 0;
+      for (let i = 0; i < stride; i++) {
+        const a = row(i - 4);
+        const b = up(i);
+        const c = up(i - 4);
+        const pred = type === 0 ? 0 : type === 1 ? a : type === 2 ? b : type === 3 ? a + b >> 1 : paeth(a, b, c);
+        const v = rgba[y * stride + i] - pred & 255;
+        line[i] = v;
+        cost += v < 128 ? v : 256 - v;
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = line;
+        bestType = type;
+      }
+    }
+    raw[y * (stride + 1)] = bestType;
+    best.copy(raw, y * (stride + 1) + 1);
+  }
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(raw, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0))
+  ]);
+}
+
 // src/games/galaga.ts
 var TARGET_PLAY3 = 58;
 var MIN_SCALE = 0.6;
@@ -4117,11 +4535,6 @@ function lookFor(kind) {
   if (kind === "butterfly") return { a: FLY_A, b: FLY_B };
   return { a: BOSS_A, b: BOSS_B };
 }
-function frames(rows, pal, outline) {
-  const w = 13 * SPRITE_SCALE;
-  const h = rows.length * SPRITE_SCALE;
-  return `<g transform="translate(${fmt(-w / 2)} ${fmt(-h / 2)})">${pixelSprite(rows, pal, SPRITE_SCALE, outline)}</g>`;
-}
 function shipArt(white, theme) {
   const pal = white ? { W: "#f4f7ff", R: "#ff3b3b", B: "#3b7bff" } : { W: "#ff8a8a", R: "#b3202c", B: "#ffd0d0" };
   const w = 13 * SHIP_SCALE;
@@ -4138,7 +4551,83 @@ function starPoints(r, inner, points) {
   }
   return pts.join(" ");
 }
-function render4(ctx) {
+function packLanes(plays) {
+  const lanes = [];
+  const free = [];
+  for (const play of [...plays].sort((a, b) => a.t - b.t)) {
+    const i = free.findIndex((end) => end <= play.t);
+    const lane = i < 0 ? lanes.length : i;
+    if (i < 0) lanes.push([]);
+    lanes[lane].push(play);
+    free[lane] = play.t + play.life + 2e-3;
+  }
+  return lanes;
+}
+function laneFrames(beats) {
+  const out = [[0, beats[0].frames[beats[0].frames.length - 1][1]]];
+  for (const beat of beats) {
+    out.push([beat.t, out[out.length - 1][1]]);
+    for (const [dt, css] of beat.frames) out.push([beat.t + dt, css]);
+  }
+  return out;
+}
+function num(n) {
+  return String(Math.round(n * 1e4) / 1e4);
+}
+function poseAt(raw, t) {
+  const sorted = [...raw].sort((a2, b2) => Math.round(a2.t * 1e5) - Math.round(b2.t * 1e5));
+  let i = sorted.length - 1;
+  while (i > 0 && sorted[i].t > t) i--;
+  const a = sorted[i];
+  const b = sorted[i + 1];
+  if (!b || b.t <= a.t) return { ...a, t };
+  const u = (t - a.t) / (b.t - a.t);
+  const lerp = (p, q) => p + (q - p) * u;
+  return { t, x: lerp(a.x, b.x), y: lerp(a.y, b.y), r: lerp(a.r, b.r), op: lerp(a.op, b.op) };
+}
+function thin(keys, values, tol) {
+  const keep = keys.map(() => false);
+  const same = (a, b) => Math.round(a.t * 1e5) === Math.round(b.t * 1e5);
+  const run = (first2, last) => {
+    keep[first2] = keep[last] = true;
+    const stack = [[first2, last]];
+    while (stack.length) {
+      const [a, b] = stack.pop();
+      const va = values(keys[a]);
+      const vb = values(keys[b]);
+      let worst = 1;
+      let at = -1;
+      for (let k = a + 1; k < b; k++) {
+        const u = (keys[k].t - keys[a].t) / (keys[b].t - keys[a].t);
+        const vk = values(keys[k]);
+        const err = Math.max(...vk.map((v, i) => Math.abs(v - (va[i] + (vb[i] - va[i]) * u)) / tol[i]));
+        if (err > worst) {
+          worst = err;
+          at = k;
+        }
+      }
+      if (at < 0) continue;
+      keep[at] = true;
+      stack.push([a, at], [at, b]);
+    }
+  };
+  let first = 0;
+  for (let i = 1; i <= keys.length; i++) {
+    if (i === keys.length || same(keys[i], keys[i - 1])) {
+      if (i - 1 >= first) run(first, i - 1);
+      first = i;
+    }
+  }
+  return keys.filter((_, i) => keep[i]);
+}
+function glowRegion(theme, id, halfWidth, halfHeight) {
+  if (theme.glow <= 0) return "";
+  return `<filter id="${id}" filterUnits="userSpaceOnUse" x="${fmt(-halfWidth)}" y="${fmt(-halfHeight)}" width="${fmt(halfWidth * 2)}" height="${fmt(halfHeight * 2)}"><feGaussianBlur stdDeviation="${fmt(theme.glow)}" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
+}
+function filterAttr(theme, id) {
+  return theme.glow > 0 ? ` filter="url(#${id})"` : "";
+}
+function render5(ctx) {
   const { grid, theme, rng } = ctx;
   const dark = isDark(theme);
   const layout = arcadeLayout(grid);
@@ -4166,12 +4655,16 @@ function render4(ctx) {
     const [kind, lv] = key.split(":");
     const level = Number(lv);
     const look = lookFor(kind);
-    defs.push(`<g id="e-${kind}${level}-a">${frames(look.a, enemyPalette(theme, level), outline)}</g>`);
-    defs.push(`<g id="e-${kind}${level}-b">${frames(look.b, enemyPalette(theme, level), outline)}</g>`);
-    if (kind === "boss") {
-      defs.push(`<g id="e-${kind}${level}-c">${frames(look.a, enemyPalette(theme, level, true), outline)}</g>`);
-      defs.push(`<g id="e-${kind}${level}-d">${frames(look.b, enemyPalette(theme, level, true), outline)}</g>`);
-    }
+    const flap = (pal) => {
+      const one = (rows, cls) => {
+        const w = 13 * SPRITE_SCALE;
+        const h = rows.length * SPRITE_SCALE;
+        return spriteImage(rows, pal, { sigma: theme.glow, cell: SPRITE_SCALE, x: -w / 2, y: -h / 2, outline }, `class="${cls}"`);
+      };
+      return one(look.a, "fa") + one(look.b, "fb");
+    };
+    defs.push(`<g id="e-${kind}${level}">${flap(enemyPalette(theme, level))}</g>`);
+    if (kind === "boss") defs.push(`<g id="e-${kind}${level}h">${flap(enemyPalette(theme, level, true))}</g>`);
   }
   defs.push(`<g id="shipw">${shipArt(true, theme)}</g><g id="shipr">${shipArt(false, theme)}</g>`);
   const boomStroke = dark ? "" : ` stroke="#7a1f10" stroke-width="1" stroke-linejoin="round"`;
@@ -4180,23 +4673,6 @@ function render4(ctx) {
     `<circle id="br" r="6" fill="none" stroke="#7fe3ff" stroke-width="2"/>`,
     `<path id="bp" d="M-1-12h2v3h-2zM9-9l2 2-2 2-2-2zM11 0h3v2h-3zM8 8l2 2-2 2-2-2zM-1 9h2v3h-2zM-9 8l2 2-2 2-2-2zM-14 0h3v2h-3zM-9-9l2 2-2 2-2-2z"/>`
   );
-  const starKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.3)"],
-    [0.1, "opacity:1;transform:scale(1)"],
-    [0.4, "opacity:0;transform:scale(1.45)"],
-    [duration, "opacity:0;transform:scale(1.45)"]
-  ]);
-  const ringKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.4)"],
-    [0.4, "opacity:0;transform:scale(3.2)"],
-    [duration, "opacity:0;transform:scale(3.2)"]
-  ]);
-  const sparkKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.5) rotate(0deg)"],
-    [0.55, "opacity:0;transform:scale(2.1) rotate(35deg)"],
-    [duration, "opacity:0;transform:scale(2.1) rotate(35deg)"]
-  ]);
-  const bulletKfs = /* @__PURE__ */ new Map();
   const starColors = dark ? ["#ff7a7a", "#7ad0ff", "#ffe27a", "#ffffff", "#8dffa8", "#cfa0ff"] : ["#d9534f", "#2f8fd4", "#c79a00", "#6a6f85", "#2fa05a", "#8250df"];
   const layers = [];
   const speeds = [26, 44, 70];
@@ -4209,16 +4685,24 @@ function render4(ctx) {
       const color = starColors[Math.floor(rng() * starColors.length)];
       const tw = `tw${Math.floor(rng() * 3)}`;
       const delay = fmt(-rng() * 3);
-      const s = sizes[li];
-      for (const dy of [0, -layout.height]) {
-        dots.push(`<rect class="${tw}" style="animation-delay:${delay}s" x="${x}" y="${fmt(y + dy)}" width="${s}" height="${s}" fill="${color}"/>`);
-      }
+      const side = fmt(sizes[li]);
+      const dot = (dy) => `M${x} ${fmt(y + dy)}h${side}v${side}h-${side}z`;
+      dots.push(`<path class="${tw}" style="animation-delay:${delay}s" d="${dot(0)}${dot(-layout.height)}" fill="${color}"/>`);
     }
     layers.push(`<g class="sc" style="animation-duration:${fmt(layout.height / speeds[li])}s">${dots.join("")}</g>`);
   }
-  const tiles = [];
-  for (const column of grid.cells) for (const cell of column) if (cell) tiles.push(cellRect(layout, cell, theme.empty));
-  const css = (x, y, r, op = 1) => `opacity:${op};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(r)}deg)`;
+  const r = layout.radius;
+  const inner = layout.cell - r * 2;
+  const tiles = [`<path fill="${theme.empty}" d="`];
+  for (const column of grid.cells) {
+    for (const cell of column) {
+      if (!cell) continue;
+      const [x, y] = cellOrigin(layout, cell.x, cell.y);
+      tiles.push(`M${fmt(x + r)} ${fmt(y)}h${inner}a${r} ${r} 0 0 1 ${r} ${r}v${inner}a${r} ${r} 0 0 1-${r} ${r}h-${inner}a${r} ${r} 0 0 1-${r}-${r}v-${inner}a${r} ${r} 0 0 1 ${r}-${r}z`);
+    }
+  }
+  tiles.push('"/>');
+  const css = (x, y, r2, op = 1) => `opacity:${op};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(r2)}deg)`;
   const capture = sim.capture;
   const rescue = sim.rescue;
   const lookId = (e) => `e-${e.kind}${e.kind === "bee" ? e.cell.level : e.kind === "butterfly" ? 3 : 4}`;
@@ -4236,7 +4720,7 @@ function render4(ctx) {
   };
   for (const e of sim.enemies) {
     const [sx, sy] = e.slot;
-    const raw = [{ t: 0, x: sx, y: sy, r: 0, op: 1 }];
+    let raw = [{ t: 0, x: sx, y: sy, r: 0, op: 1 }];
     const rest = (t, op = 1) => raw.push({ t, x: sx, y: sy, r: 0, op });
     const isCaptor = capture !== null && capture.boss === e.id;
     let dives = e.dives;
@@ -4268,27 +4752,41 @@ function render4(ctx) {
     }
     rest(restore, 0);
     rest(fadeEnd);
+    raw.sort((a, b) => Math.round(a.t * 1e5) - Math.round(b.t * 1e5));
+    raw = thin(raw, (q) => [q.x, q.y, q.r, q.op], [0.04, 0.04, 0.15, 2e-3]);
     const id = lookId(e);
-    const flap = (suffix) => `<use href="#${id}-${suffix[0]}" class="fa"/><use href="#${id}-${suffix[1]}" class="fb"/>`;
+    const pose = (q, op = q.op) => `opacity:${op};transform:translate(${fmt(q.x)}px,${fmt(q.y)}px) rotate(${fmt(q.r)}deg)`;
     if (e.kind !== "boss") {
-      const cls = tl.track(raw.map((q) => [q.t, `opacity:${q.op};transform:translate(${fmt(q.x)}px,${fmt(q.y)}px) rotate(${fmt(q.r)}deg)`]));
-      enemyEls.push(`<g class="${cls}">${flap(["a", "b"])}</g>`);
+      enemyEls.push(`<use href="#${id}" class="${tl.track(raw.map((q) => [q.t, pose(q)]))}"/>`);
       continue;
     }
     const hit = e.hit === null ? null : at(e.hit);
+    if (!isCaptor || !capture) {
+      if (hit === null) {
+        enemyEls.push(`<use href="#${id}" class="${tl.track(raw.map((q) => [q.t, pose(q)]))}"/>`);
+        continue;
+      }
+      const p = poseAt(raw, hit);
+      const healthy2 = [...raw.filter((q) => q.t < hit).map((q) => [q.t, pose(q)]), [hit, pose(p)], [hit, pose(p, 0)], ...raw.filter((q) => q.t >= restore).map((q) => [q.t, pose(q)])];
+      const hurt2 = [
+        [0, pose(raw[0], 0)],
+        [hit, pose(p, 0)],
+        [hit, pose(p)],
+        ...raw.filter((q) => q.t > hit && q.t < restore).map((q) => [q.t, pose(q)]),
+        ...raw.filter((q) => q.t >= restore).map((q) => [q.t, pose(q, 0)])
+      ];
+      enemyEls.push(`<use href="#${id}" class="${tl.track(healthy2)}"/><use href="#${id}h" class="${tl.track(hurt2)}"/>`);
+      continue;
+    }
     const healthy = tl.track(hit === null ? [[0, "opacity:1"]] : [[0, "opacity:1"], [hit, "opacity:1"], [hit, "opacity:0"], [restore, "opacity:0"], [restore, "opacity:1"]]);
     const hurt = tl.track(hit === null ? [[0, "opacity:0"]] : [[0, "opacity:0"], [hit, "opacity:0"], [hit, "opacity:1"], [restore, "opacity:1"], [restore, "opacity:0"]]);
-    const look = `<g class="${healthy}">${flap(["a", "b"])}</g><g class="${hurt}">${flap(["c", "d"])}</g>`;
+    const look = `<use href="#${id}" class="${healthy}"/><use href="#${id}h" class="${hurt}"/>`;
     const pos = tl.track(raw.map((q) => [q.t, `opacity:${q.op};transform:translate(${fmt(q.x)}px,${fmt(q.y)}px)`]));
     const rot = tl.track(raw.map((q) => [q.t, `transform:rotate(${fmt(q.r)}deg)`]));
-    let captive = "";
-    if (isCaptor && capture) {
-      const shown = at(capture.abductEnd);
-      const gone = rescue ? at(rescue.t) : restore;
-      const capTrack = tl.track([[0, "opacity:0"], [shown, "opacity:0"], [shown, "opacity:1"], [gone, "opacity:1"], [gone, "opacity:0"]]);
-      captive = `<use href="#shipr" class="${capTrack}" y="19"/>`;
-    }
-    enemyEls.push(`<g class="${pos}"><g class="${rot}">${look}</g>${captive}</g>`);
+    const shown = at(capture.abductEnd);
+    const gone = rescue ? at(rescue.t) : restore;
+    const capTrack = tl.track([[0, "opacity:0"], [shown, "opacity:0"], [shown, "opacity:1"], [gone, "opacity:1"], [gone, "opacity:0"]]);
+    enemyEls.push(`<g class="${pos}"><g class="${rot}">${look}</g><use href="#shipr" class="${capTrack}" y="19"/></g>`);
   }
   let beam = "";
   if (capture) {
@@ -4305,54 +4803,87 @@ function render4(ctx) {
     }
     const on = at(capture.beamOn);
     const off = at(capture.beamOff);
-    const grow = tl.track([
-      [0, "opacity:0;transform:scaleY(.05)"],
-      [on, "opacity:0;transform:scaleY(.05)"],
-      [on + 0.12, "opacity:1;transform:scaleY(.2)"],
-      [on + 0.55, "opacity:1;transform:scaleY(1)"],
-      [off, "opacity:1;transform:scaleY(1)"],
-      [off + 0.3, "opacity:0;transform:scaleY(1)"]
+    const shown = tl.track([
+      [0, "opacity:0"],
+      [on, "opacity:0"],
+      [on + 0.12, "opacity:1"],
+      [off, "opacity:1"],
+      [off + 0.3, "opacity:0"]
     ]);
-    beam = `<g transform="translate(${fmt(hx)} ${fmt(top)})"><g class="${grow}" style="transform-origin:0 0"><polygon points="${fmt(-w0)} 0 ${fmt(w0)} 0 ${fmt(w1)} ${fmt(height)} ${fmt(-w1)} ${fmt(height)}" fill="#4db8ff" opacity=".28"/>${lines.join("")}</g></g>`;
+    const grow = tl.track([
+      [0, "transform:scaleY(.05)"],
+      [on, "transform:scaleY(.05)"],
+      [on + 0.12, "transform:scaleY(.2)"],
+      [on + 0.55, "transform:scaleY(1)"]
+    ]);
+    beam = `<g class="${shown}"${glowAttr(theme)}><g transform="translate(${fmt(hx)} ${fmt(top)})"><g class="${grow}" style="transform-origin:0 0"><polygon points="${fmt(-w0)} 0 ${fmt(w0)} 0 ${fmt(w1)} ${fmt(height)} ${fmt(-w1)} ${fmt(height)}" fill="#4db8ff" opacity=".28"/>${lines.join("")}</g></g></g>`;
   }
   const breath = [[0, "transform:scale(1)"]];
   for (let k = 0; k * BREATH_STEP <= sim.end + 1e-6; k++) breath.push([at(k * BREATH_STEP), `transform:scale(${(1 + breathAt(k * BREATH_STEP)).toFixed(4)})`]);
   breath.push([at(sim.end) + 0.01, "transform:scale(1)"], [duration, "transform:scale(1)"]);
   const breathCls = hasPlay ? tl.track(breath) : tl.track([[0, "transform:scale(1)"]]);
-  const shotEls = [];
+  const reach = Math.ceil(theme.glow * 3) + 1;
+  const shotBeats = [];
   for (const s of sim.shots) {
     const dist = s.y0 - s.yEnd;
     const dur = Math.round((s.tEnd - s.t) * scale * 200) / 200;
     if (dist < 1 || dur <= 0) continue;
-    const key = `${Math.round(dist * 2)}:${dur}`;
-    let name = bulletKfs.get(key);
-    if (!name) {
-      name = tl.keyframes([
-        [0, "opacity:1;transform:translateY(0px)"],
-        [dur, "opacity:1;transform:translateY(" + fmt(-dist) + "px)"],
-        [dur + 1e-3, "opacity:0;transform:translateY(" + fmt(-dist) + "px)"],
-        [duration, "opacity:0;transform:translateY(" + fmt(-dist) + "px)"]
-      ]);
-      bulletKfs.set(key, name);
+    const from = `translate(${fmt(s.x)}px,${fmt(s.y0)}px)`;
+    const to = `translate(${fmt(s.x)}px,${fmt(s.y0 - dist)}px)`;
+    shotBeats.push({
+      t: at(s.t),
+      life: dur + 1e-3,
+      frames: [[0, `opacity:1;transform:${from}`], [dur, `opacity:1;transform:${to}`], [dur + 1e-3, `opacity:0;transform:${to}`]]
+    });
+  }
+  defs.push(glowRegion(theme, "glow-shot", 1.4 + reach, 5 + reach));
+  const shotEls = packLanes(shotBeats).map(
+    (lane) => `<g class="${tl.track(laneFrames(lane))}"${filterAttr(theme, "glow-shot")}><rect x="-1.4" y="-5" width="2.8" height="10" rx="1" fill="${theme.accent}"/><rect x="-.5" y="-5" width="1" height="8" fill="#fff"/></g>`
+  );
+  const BOOM_LIFE = 0.55;
+  const boomScale = (b) => b.size === "l" ? 1.9 : b.size === "m" ? 1.35 : 1;
+  const boomPose = (k, extra = "") => `scale(${num(k)})${extra}`;
+  const boomRegions = /* @__PURE__ */ new Map();
+  const slots = packLanes(sim.booms.map((b) => ({ t: at(b.t), life: BOOM_LIFE, b })));
+  const boomEls = slots.map((slot) => {
+    const star = [];
+    const ring = [];
+    const spark = [];
+    const ring2 = [];
+    for (const { t, b } of slot) {
+      const k = boomScale(b);
+      star.push({
+        t,
+        life: 0.4,
+        frames: [[0, `opacity:1;transform:${boomPose(k * 0.3)}`], [0.1, `opacity:1;transform:${boomPose(k)}`], [0.4, `opacity:0;transform:${boomPose(k * 1.45)}`]]
+      });
+      const ringFrames = [[0, `opacity:1;transform:${boomPose(k * 0.4)}`], [0.4, `opacity:0;transform:${boomPose(k * 3.2)}`]];
+      ring.push({ t, life: 0.4, frames: ringFrames });
+      spark.push({
+        t,
+        life: 0.55,
+        frames: [[0, `opacity:1;transform:${boomPose(k * 0.5, " rotate(0deg)")}`], [0.55, `opacity:0;transform:${boomPose(k * 2.1, " rotate(35deg)")}`]]
+      });
+      if (b.size === "l") ring2.push({ t: t + 0.12, life: 0.4, frames: ringFrames });
     }
-    const cls = tl.useKeyframes(name, at(s.t));
-    shotEls.push(`<g transform="translate(${fmt(s.x)} ${fmt(s.y0)})"><g class="${cls}"><rect x="-1.4" y="-5" width="2.8" height="10" rx="1" fill="${theme.accent}"/><rect x="-.5" y="-5" width="1" height="8" fill="#fff"/></g></g>`);
-  }
-  const boomEls = [];
-  for (const b of sim.booms) {
-    const t = at(b.t);
-    const k = b.size === "l" ? 1.9 : b.size === "m" ? 1.35 : 1;
     const parts = [
-      `<use href="#bs" class="${tl.useKeyframes(starKf, t)}"/>`,
-      `<use href="#br" class="${tl.useKeyframes(ringKf, t)}"/>`,
-      `<use href="#bp" fill="${theme.accent}" class="${tl.useKeyframes(sparkKf, t)}"/>`
+      `<use href="#bs" class="${tl.track(laneFrames(star))}"/>`,
+      `<use href="#br" class="${tl.track(laneFrames(ring))}"/>`,
+      `<use href="#bp" fill="${theme.accent}" class="${tl.track(laneFrames(spark))}"/>`
     ];
-    if (b.size === "l") parts.push(`<use href="#br" class="${tl.useKeyframes(ringKf, t + 0.12)}" stroke="${theme.accent}"/>`);
-    boomEls.push(`<g transform="translate(${fmt(b.x)} ${fmt(b.y)}) scale(${k})">${parts.join("")}</g>`);
-  }
+    if (ring2.length) parts.push(`<use href="#br" class="${tl.track(laneFrames(ring2))}" stroke="${theme.accent}"/>`);
+    const move = slot.map(({ t, b }) => {
+      const place = `translate(${fmt(b.x)}px,${fmt(b.y)}px)`;
+      return { t, life: BOOM_LIFE, frames: [[0, `opacity:1;transform:${place}`], [BOOM_LIFE, `opacity:1;transform:${place}`], [BOOM_LIFE + 1e-3, `opacity:0;transform:${place}`]] };
+    });
+    const half = Math.ceil(30 * Math.max(...slot.map(({ b }) => boomScale(b)))) + reach;
+    boomRegions.set(`glow-boom-${half}`, half);
+    return `<g class="${tl.track(laneFrames(move))}"${filterAttr(theme, `glow-boom-${half}`)}>${parts.join("")}</g>`;
+  });
+  for (const [id, half] of boomRegions) defs.push(glowRegion(theme, id, half, half));
   const keyCss = (k) => `transform:translate(${fmt(k.x)}px,${fmt(k.y)}px) rotate(${fmt(k.rot)}deg) scale(${fmt(k.scale)})`;
   const fighterFrames = [];
-  for (const k of sim.fighter) fighterFrames.push([at(k.t), keyCss(k)]);
+  for (const k of thin(sim.fighter, (f) => [f.x, f.y, f.rot, f.scale], [0.04, 0.04, 0.15, 2e-3])) fighterFrames.push([at(k.t), keyCss(k)]);
   const startKey = sim.fighter[0] ?? { x: cx, y: FIGHTER_Y, rot: 0, scale: 1, t: 0 };
   const endKey = sim.fighter[sim.fighter.length - 1] ?? startKey;
   const hideAt = restore + 0.3;
@@ -4379,15 +4910,18 @@ function render4(ctx) {
       ff.push([t0 + (t1 - t0) * u, `opacity:1;transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(720 * (1 - ease))}deg)`]);
     }
     ff.push([t1 + 1e-3, `opacity:0;transform:translate(${fmt(fx1)}px,${fmt(fy1)}px) rotate(0deg)`], [duration, `opacity:0;transform:translate(${fmt(fx1)}px,${fmt(fy1)}px) rotate(0deg)`]);
-    flyer = `<g${glowAttr(theme)}><use href="#shipw" class="${tl.track(ff)}"/></g>`;
+    flyer = `<g class="${tl.visible(t0, t1 + 2e-3)}"${glowAttr(theme)}><use href="#shipw" class="${tl.track(ff)}"/></g>`;
   }
   const stageCss = [
     ".sc{animation:scroll linear infinite}",
     `@keyframes scroll{from{transform:translateY(0)}to{transform:translateY(${layout.height}px)}}`,
     ".tw0{animation:tw .9s ease-in-out infinite}.tw1{animation:tw 1.4s ease-in-out infinite}.tw2{animation:tw 2.1s ease-in-out infinite}",
     "@keyframes tw{0%,100%{opacity:.95}50%{opacity:.25}}",
-    ".fa{animation:flapa .7s steps(1) infinite}.fb{animation:flapb .7s steps(1) infinite}",
-    "@keyframes flapa{0%{opacity:1}50%{opacity:0}}@keyframes flapb{0%{opacity:0}50%{opacity:1}}",
+    // The wing flap is one animated variable on the root that every sprite reads, instead of an animation per sprite.
+    // Browsers that cannot animate it just show the first frame.
+    "@property --fa{syntax:'*';inherits:true;initial-value:visible}@property --fb{syntax:'*';inherits:true;initial-value:hidden}",
+    ":root{animation:flap .7s steps(1) infinite}@keyframes flap{0%{--fa:visible;--fb:hidden}50%{--fa:hidden;--fb:visible}100%{--fa:visible;--fb:hidden}}",
+    ".fa{visibility:var(--fa,visible)}.fb{visibility:var(--fb,hidden)}",
     ".bl{animation:beam .6s linear infinite}",
     "@keyframes beam{0%{opacity:0}30%{opacity:1}100%{opacity:0}}",
     `.breath{transform-origin:${fmt(cx)}px ${fmt(cy)}px}`
@@ -4397,9 +4931,9 @@ function render4(ctx) {
   const body = [
     `<g>${layers.join("")}</g>`,
     `<g>${tiles.join("")}</g>`,
-    `<g class="breath ${breathCls}"${glowAttr(theme)}>${beam}${enemyEls.join("")}</g>`,
-    `<g${glowAttr(theme)}>${shotEls.join("")}</g>`,
-    `<g${glowAttr(theme)}>${boomEls.join("")}</g>`,
+    `<g class="breath ${breathCls}">${beam}${enemyEls.join("")}</g>`,
+    shotEls.join(""),
+    boomEls.join(""),
     flyer,
     `<g class="${fighterCls}"><g class="${fadeCls}"${glowAttr(theme)}><use href="#shipw"/><use href="#shipw" x="${SEP}" class="${shipB}"/></g></g>`,
     hudMarkup,
@@ -4408,7 +4942,7 @@ function render4(ctx) {
   return { width: layout.width, height: layout.height, css: `${stageCss}
 ${tl.css()}`, defs: defs.join(""), body };
 }
-var galaga = { id: "galaga", title: "Galaga", render: render4 };
+var galaga = { id: "galaga", title: "Galaga", render: render5 };
 
 // src/games/invaders.ts
 var OCTOPUS = [
@@ -4540,6 +5074,7 @@ var SHOT_CHIPS_PER_BUNKER = 2;
 var BUNKER_LANE_COST = 70;
 var SHOT_H = 10;
 var SHOT_LEAD = 6;
+var KILL_GROUP = 14;
 function makeField(grid) {
   const layout = arcadeLayout(grid);
   const bottom = layout.top + layout.gridHeight;
@@ -4854,8 +5389,31 @@ function simulateInvaders(grid, rng) {
   play.length = Math.max(lastHit + 0.3, ufoEnd + 0.1, ...play.bombs.map((b) => b.end + 0.25));
   return play;
 }
+function pooled(tl, plays) {
+  const slots = [];
+  for (const play of [...plays].sort((p, q) => p.frames[0][0] - q.frames[0][0])) {
+    const [start] = play.frames[0];
+    const [end, rest] = play.frames[play.frames.length - 1];
+    let slot = slots.find((s) => s.free <= start);
+    if (!slot) {
+      slot = { free: 0, last: rest, frames: [[0, rest]] };
+      slots.push(slot);
+    }
+    slot.frames.push([start, slot.last], ...play.frames);
+    slot.free = end;
+    slot.last = rest;
+  }
+  return slots.map((s) => tl.track(s.frames));
+}
+function haloPath(rows, scale, reach) {
+  return bitmapRects(rows).map((r) => {
+    const [x0, y0, x1, y1] = [r.x * scale - reach, r.y * scale - reach, r.end * scale + reach, (r.y + r.h) * scale + reach];
+    const arc = (x, y) => `A${reach} ${reach} 0 0 1 ${fmt(x)} ${fmt(y)}`;
+    return `M${fmt(x0 + reach)} ${fmt(y0)}H${fmt(x1 - reach)}${arc(x1, y0 + reach)}V${fmt(y1 - reach)}${arc(x1 - reach, y1)}H${fmt(x0 + reach)}${arc(x0, y1 - reach)}V${fmt(y0 + reach)}${arc(x0 + reach, y0)}z`;
+  }).join("");
+}
 var tri = (t, ...css) => css.map((c) => [t, c]);
-function render5(ctx) {
+function render6(ctx) {
   const { grid, theme, rng } = ctx;
   const sim = simulateInvaders(grid, rng);
   const { field } = sim;
@@ -4870,120 +5428,115 @@ function render5(ctx) {
   const green = theme.name === "github-dark" ? "#20ff20" : light ? "#1a7f37" : theme.accent;
   const red = light ? "#cf222e" : theme.name === "github-dark" ? "#ff3b3b" : "#ff4d6d";
   const glow = glowAttr(theme);
-  const halo = (color) => theme.glow > 0 ? ` stroke="${color}" stroke-opacity=".3" stroke-width="${theme.glow > 2 ? 2.6 : 1.8}" stroke-linejoin="round"` : "";
+  const haloReach = theme.glow > 2 ? 1.3 : 0.9;
+  const sprite2 = (id, rows, scale) => `<g id="${id}">${theme.glow > 0 ? `<path d="${haloPath(rows, scale, haloReach)}" fill-opacity=".3"/>` : ""}<path d="${bitmapPath(rows, scale)}"/></g>`;
   const ink = theme.ink;
-  const delay = (t) => `style="--d:${(-(duration - at(t))).toFixed(3)}s"`;
   const empty = sim.kills.length === 0;
   const defs = [];
   const names = ["o", "c", "s"];
-  [OCTOPUS, CRAB, SQUID].forEach((frames2, i) => {
-    frames2.forEach((rows, f) => defs.push(`<path id="${names[i]}${f}" d="${bitmapPath(rows, [SPRITE_SCALE2[0], SPRITE_SCALE2[2], SPRITE_SCALE2[3]][i])}"/>`));
+  [OCTOPUS, CRAB, SQUID].forEach((frames, i) => {
+    frames.forEach((rows, f) => defs.push(sprite2(`${names[i]}${f}`, rows, [SPRITE_SCALE2[0], SPRITE_SCALE2[2], SPRITE_SCALE2[3]][i])));
   });
-  defs.push(`<path id="bl" d="${bitmapPath(BLAST, BLAST_SCALE)}"/>`, `<path id="sp" d="${bitmapPath(SPLAT)}"/>`);
+  defs.push(`<path id="bl" d="${bitmapPath(BLAST, BLAST_SCALE)}"/>`, sprite2("bh", BLAST, BLAST_SCALE), `<path id="sp" d="${bitmapPath(SPLAT)}"/>`);
   defs.push(`<path id="uf" d="${bitmapPath(UFO, UFO_SCALE)}"/>`, `<path id="cn" d="${bitmapPath(CANNON, CANNON_SCALE)}"/>`);
   for (let i = 0; i < 4; i++) defs.push(`<path id="bm${i}" d="${bitmapPath(bombRows(i))}"/>`);
   const parts = [];
   for (const cell of allCells(grid)) parts.push(cellRect(layout, cell, theme.empty));
-  const marchFrames = [[0, "transform:translate(0px,0px)"]];
-  const legA = [[0, "opacity:1"]];
-  const legB = [[0, "opacity:0"]];
   const lastKill = sim.kills.length ? sim.kills[sim.kills.length - 1].t : 0;
-  sim.march.times.forEach((t, i) => {
-    if (t > lastKill + 0.01) return;
-    const T = at(t);
-    const showA = (i + 1) % 2 === 0;
-    marchFrames.push([T, marchFrames[marchFrames.length - 1][1]], [T, translate(sim.march.offsets[i], 0)]);
-    legA.push([T, `opacity:${showA ? 0 : 1}`], [T, `opacity:${showA ? 1 : 0}`]);
-    legB.push([T, `opacity:${showA ? 1 : 0}`], [T, `opacity:${showA ? 0 : 1}`]);
-  });
-  marchFrames.push([at(lastKill) + 0.05, marchFrames[marchFrames.length - 1][1]], [at(lastKill) + 0.05, "transform:translate(0px,0px)"]);
-  legA.push([at(lastKill) + 0.05, "opacity:1"]);
-  legB.push([at(lastKill) + 0.05, "opacity:0"]);
-  const marchClass = tl.track(marchFrames);
-  const legAClass = tl.track(legA);
-  const legBClass = tl.track(legB);
-  const invaders2 = [];
-  const blasts = [];
-  const blastKeys = tl.keyframes([[0, "opacity:1"], [0.26, "opacity:1"], [0.261, "opacity:0"]]);
-  for (const kill of sim.kills) {
-    const { cell } = kill;
-    const kind = species(cell);
-    const id = SPRITE_ID[kind];
-    const x = layout.left + cell.x * layout.pitch;
-    const y = spriteTop(layout, cell);
-    const T = at(kill.t);
-    const cls = tl.track([
-      [0, "opacity:1"],
-      [T, "opacity:1"],
-      [T + 1e-3, "opacity:0"],
-      [back, "opacity:0"],
-      [back + PACE.restore, "opacity:1"]
-    ]);
-    invaders2.push(
-      `<g class="${cls}" fill="${spriteColor(theme, cell)}"${halo(spriteColor(theme, cell))}><use class="${legAClass}" href="#${id}0" x="${fmt(x)}" y="${fmt(y)}"/><use class="${legBClass}" href="#${id}1" x="${fmt(x)}" y="${fmt(y)}"/></g>`
-    );
-    const cx = columnX(layout, cell.x) + offsetAt(sim.march, kill.t);
-    blasts.push(`<use class="bx" href="#bl" x="${fmt(cx - 6.5 * BLAST_SCALE)}" y="${fmt(y + spriteHeight(cell) / 2 - 3.5 * BLAST_SCALE)}" ${delay(kill.t)}/>`);
+  const beats = sim.march.times.map((t, i) => ({ t: at(t), raw: t, off: sim.march.offsets[i], legs: (i + 1) % 2 === 0 ? 1 : 0 })).filter((b) => b.raw <= lastKill + 0.01);
+  const settle = at(lastKill) + 0.05;
+  const layerFrames = (pose) => {
+    let off = 0;
+    let legs = 1;
+    const look = (opacity = 1) => `opacity:${opacity};${translate(off, 0)};visibility:${legs === 1 - pose ? "visible" : "hidden"}`;
+    const frames = [[0, look()]];
+    for (const b of beats) {
+      frames.push([b.t, look()]);
+      ({ off, legs } = b);
+      frames.push([b.t, look()]);
+    }
+    frames.push([settle, look()]);
+    off = 0;
+    legs = 1;
+    frames.push([settle, look()], [back, look()], [back, look(0)], [back + PACE.restore, look()]);
+    return frames;
+  };
+  const blastPlays = [];
+  const layers = [[], []];
+  for (let first = 0; first < sim.kills.length; first += KILL_GROUP) {
+    const members = sim.kills.slice(first, first + KILL_GROUP);
+    const counter = [[0, "--n:0"]];
+    members.forEach((kill, i) => counter.push([at(kill.t), `--n:${i}`], [at(kill.t), `--n:${i + 1}`]));
+    counter.push([back, `--n:${members.length}`], [back, "--n:0"]);
+    const keys = tl.keyframes(counter);
+    for (const pose of [0, 1]) {
+      const sprites = members.map(({ cell }, i) => {
+        const x = layout.left + cell.x * layout.pitch;
+        const y = spriteTop(layout, cell);
+        return `<use class="k" style="--i:${i + 1}" href="#${SPRITE_ID[species(cell)]}${pose}" x="${fmt(x)}" y="${fmt(y)}" fill="${spriteColor(theme, cell)}"/>`;
+      });
+      layers[pose].push(`<g class="${tl.useKeyframes(keys, 0)}" style="--n:0">${sprites.join("")}</g>`);
+    }
+    for (const kill of members) {
+      const { cell } = kill;
+      const cx = columnX(layout, cell.x) + offsetAt(sim.march, kill.t);
+      const T = at(kill.t);
+      const spot = translate(cx - 6.5 * BLAST_SCALE, spriteTop(layout, cell) + spriteHeight(cell) / 2 - 3.5 * BLAST_SCALE);
+      blastPlays.push({ frames: [[T, `opacity:1;${spot}`], [T + 0.26, `opacity:1;${spot}`], [T + 0.261, `opacity:0;${spot}`]] });
+    }
   }
-  parts.push(`<g class="${marchClass}">${invaders2.join("")}</g>`);
-  parts.push(`<g fill="${ink}"${halo(ink)}>${blasts.join("")}</g>`);
+  if (sim.kills.length) layers.forEach((markup, pose) => parts.push(`<g class="${tl.track(layerFrames(pose))}">${markup.join("")}</g>`));
+  parts.push(`<g fill="${ink}">${pooled(tl, blastPlays).map((c) => `<use class="${c}" href="#bh"/>`).join("")}</g>`);
   const gone = /* @__PURE__ */ new Set();
   for (const chip of sim.chips) for (const [b, c, r] of chip.tiles) gone.add(`${b}:${c}:${r}`);
-  const bunkerStatic = [];
   field.bunkerX.forEach((bx, b) => {
     const rows = BUNKER.map((row, r) => [...row].map((ch, c) => ch === "#" && !gone.has(`${b}:${c}:${r}`) ? "#" : ".").join(""));
-    bunkerStatic.push(bitmapPath(rows, BUNKER_TILE, bx, field.bunkerTop));
+    parts.push(`<path d="${bitmapPath(rows, BUNKER_TILE, bx, field.bunkerTop)}" fill="${green}"${glow}/>`);
   });
-  parts.push(`<path d="${bunkerStatic.join("")}" fill="${green}"${glow}/>`);
-  for (const chip of sim.chips) {
+  const chips = [...sim.chips].sort((p, q) => p.t - q.t);
+  const chipFrames = [[0, "opacity:1;--c:0"]];
+  chips.forEach((chip, i) => chipFrames.push([at(chip.t), `opacity:1;--c:${i}`], [at(chip.t), `opacity:1;--c:${i + 1}`]));
+  chipFrames.push([back, `opacity:1;--c:${chips.length}`], [back, "opacity:0;--c:0"], [back + PACE.restore, "opacity:1;--c:0"]);
+  const chipPaths = chips.map((chip, i) => {
     const d = chip.tiles.map(([b, c, r]) => bitmapPath(["#"], BUNKER_TILE, field.bunkerX[b] + c * BUNKER_TILE, field.bunkerTop + r * BUNKER_TILE)).join("");
-    const T = at(chip.t);
-    const cls = tl.track([
-      [0, "opacity:1"],
-      [T, "opacity:1"],
-      [T + 1e-3, "opacity:0"],
-      [back, "opacity:0"],
-      [back + PACE.restore, "opacity:1"]
-    ]);
-    parts.push(`<path class="${cls}" d="${d}" fill="${green}"/>`);
-  }
+    return `<path class="chip" style="--i:${i + 1}" d="${d}"/>`;
+  });
+  if (chips.length) parts.push(`<g class="${tl.track(chipFrames)}" style="--c:0" fill="${green}">${chipPaths.join("")}</g>`);
   parts.push(`<rect x="4" y="${field.groundY}" width="${field.width - 8}" height="2" fill="${green}" opacity=".75"/>`);
-  const shotKeys = /* @__PURE__ */ new Map();
-  const shotCss = [];
-  const shotEls = [];
-  for (const s of sim.shots) {
-    const travel = Math.round(field.cannonY - SHOT_LEAD - s.y);
-    let name = shotKeys.get(travel);
-    if (!name) {
-      const flight = travel / SHOT_SPEED;
-      name = tl.keyframes([
-        [0, "opacity:1;transform:translateY(0px)"],
-        [flight, `opacity:1;transform:translateY(${-travel}px)`],
-        [flight + 1e-3, `opacity:0;transform:translateY(${-travel}px)`]
-      ]);
-      shotKeys.set(travel, name);
-      shotCss.push(`.sh${shotKeys.size}{animation:${name} ${fmt(duration)}s linear infinite;animation-delay:var(--d)}`);
-    }
-    const idx = [...shotKeys.keys()].indexOf(travel) + 1;
-    shotEls.push(`<rect class="sh${idx}" x="${fmt(s.x - 1)}" y="${field.cannonY - SHOT_LEAD}" width="2" height="${SHOT_H}" stroke="${green}" stroke-opacity=".55" stroke-width="2" ${delay(s.fire)}/>`);
-  }
+  const shotPlays = sim.shots.map((s) => {
+    const top = field.cannonY - SHOT_LEAD;
+    const rise = Math.round(top - s.y);
+    const T = at(s.fire);
+    const end = at(s.fire + rise / SHOT_SPEED);
+    return {
+      frames: [
+        [T, `opacity:1;${translate(s.x - 1, top)}`],
+        [end, `opacity:1;${translate(s.x - 1, top - rise)}`],
+        [end + 1e-3, `opacity:0;${translate(s.x - 1, top - rise)}`]
+      ]
+    };
+  });
+  const shotEls = pooled(tl, shotPlays).map(
+    (c) => `<rect class="${c}" width="2" height="${SHOT_H}" stroke="${green}" stroke-opacity=".55" stroke-width="2"/>`
+  );
   parts.push(`<g fill="${ink}">${shotEls.join("")}</g>`);
-  const splatKeys = tl.keyframes([[0, "opacity:1"], [0.2, "opacity:1"], [0.201, "opacity:0"]]);
-  const bombEls = [];
-  const splatEls = [];
+  const bombPlays = [];
+  const splatPlays = [];
   for (const b of sim.bombs) {
     const t0 = at(b.t);
     const t1 = at(b.end);
-    const cls = tl.track([
-      [0, `opacity:0;${translate(b.x - 1.5, b.y0)}`],
-      [t0, `opacity:0;${translate(b.x - 1.5, b.y0)}`],
-      [t0, `opacity:1;${translate(b.x - 1.5, b.y0)}`],
-      [t1, `opacity:1;${translate(b.x - 1.5, b.y1)}`],
-      [t1, `opacity:0;${translate(b.x - 1.5, b.y1)}`]
-    ]);
-    bombEls.push(`<g class="${cls}">${[0, 1, 2, 3].map((i) => `<use class="bf${i}" href="#bm${i}"/>`).join("")}</g>`);
-    splatEls.push(`<use class="sx" href="#sp" x="${fmt(b.x - 3)}" y="${fmt(b.y1 + 2)}" ${delay(b.end)}/>`);
+    bombPlays.push({
+      frames: [
+        [t0, `opacity:1;${translate(b.x - 1.5, b.y0)}`],
+        [t1, `opacity:1;${translate(b.x - 1.5, b.y1)}`],
+        [t1, `opacity:0;${translate(b.x - 1.5, b.y1)}`]
+      ]
+    });
+    const spot = translate(b.x - 3, b.y1 + 2);
+    splatPlays.push({ frames: [[t1, `opacity:1;${spot}`], [t1 + 0.2, `opacity:1;${spot}`], [t1 + 0.201, `opacity:0;${spot}`]] });
   }
+  const bombEls = pooled(tl, bombPlays).map((c) => `<g class="${c}">${[0, 1, 2, 3].map((i) => `<use class="bf${i}" href="#bm${i}"/>`).join("")}</g>`);
+  const splatEls = pooled(tl, splatPlays).map((c) => `<use class="${c}" href="#sp"/>`);
   parts.push(`<g fill="${ink}">${bombEls.join("")}${splatEls.join("")}</g>`);
   const ufoEls = [];
   for (const u of sim.ufos) {
@@ -4991,20 +5544,22 @@ function render5(ctx) {
     const endX2 = u.dir > 0 ? field.width : -24;
     const cross = (field.width + 16) / UFO_SPEED;
     const a = at(u.start);
-    const frames2 = [[0, `opacity:0;${translate(startX, field.ufoY)}`], [a, `opacity:0;${translate(startX, field.ufoY)}`], [a, `opacity:1;${translate(startX, field.ufoY)}`]];
+    const frames = [[0, `opacity:0;${translate(startX, field.ufoY)}`], [a, `opacity:0;${translate(startX, field.ufoY)}`], [a, `opacity:1;${translate(startX, field.ufoY)}`]];
     if (u.hit !== null) {
       const h = at(u.hit);
       const x = u.hitX - 8 * UFO_SCALE;
-      frames2.push([h, `opacity:1;${translate(x, field.ufoY)}`], [h, `opacity:0;${translate(x, field.ufoY)}`]);
+      frames.push([h, `opacity:1;${translate(x, field.ufoY)}`], [h, `opacity:0;${translate(x, field.ufoY)}`]);
     } else {
-      frames2.push([a + cross, `opacity:1;${translate(endX2, field.ufoY)}`], [a + cross, `opacity:0;${translate(endX2, field.ufoY)}`]);
+      frames.push([a + cross, `opacity:1;${translate(endX2, field.ufoY)}`], [a + cross, `opacity:0;${translate(endX2, field.ufoY)}`]);
     }
-    ufoEls.push(`<use class="${tl.track(frames2)}" href="#uf" fill="${red}"/>`);
+    ufoEls.push(`<use class="${tl.track(frames)}" href="#uf" fill="${red}"/>`);
     if (u.hit !== null) {
       const h = at(u.hit);
       const label = pixelText(String(u.score), 2);
       const lx = Math.min(Math.max(u.hitX - label.width / 2, 2), field.width - label.width - 2);
-      ufoEls.push(`<use class="bx" href="#bl" x="${fmt(u.hitX - 6.5 * BLAST_SCALE)}" y="${fmt(field.ufoY + 3.5 * UFO_SCALE - 3.5 * BLAST_SCALE)}" fill="${red}" ${delay(u.hit)}/>`);
+      const spot = translate(u.hitX - 6.5 * BLAST_SCALE, field.ufoY + 3.5 * UFO_SCALE - 3.5 * BLAST_SCALE);
+      const blast = tl.track([[0, `opacity:0;${spot}`], [h, `opacity:0;${spot}`], [h, `opacity:1;${spot}`], [h + 0.26, `opacity:1;${spot}`], [h + 0.261, `opacity:0;${spot}`]]);
+      ufoEls.push(`<use class="${blast}" href="#bl" fill="${red}"/>`);
       const cls = tl.track([[0, "opacity:0"], [h + 0.2, "opacity:0"], [h + 0.2, "opacity:1"], [h + 1.2, "opacity:1"], [h + 1.2, "opacity:0"]]);
       ufoEls.push(`<path class="${cls}" d="${label.d}" transform="translate(${fmt(lx)} ${field.ufoY - 3})" fill="${red}"/>`);
     }
@@ -5031,11 +5586,9 @@ function render5(ctx) {
   const clears = sim.kills.map((k) => ({ t: at(k.t), cell: k.cell }));
   parts.push(hud(tl, grid, { theme, title: "SPACE INVADERS", clears, resetAt: back, width: field.width }));
   const cycle = 0.32;
-  const dur = (n) => fmt(n);
   const css = [
-    `.bx{animation:${blastKeys} ${dur(duration)}s linear infinite;animation-delay:var(--d)}`,
-    `.sx{animation:${splatKeys} ${dur(duration)}s linear infinite;animation-delay:var(--d)}`,
-    ...shotCss,
+    ".k{opacity:clamp(0,calc(var(--i) - var(--n)),1)}",
+    ".chip{opacity:clamp(0,calc(var(--i) - var(--c)),1)}",
     "@keyframes bfk{0%{opacity:1}25%{opacity:0}100%{opacity:0}}",
     ...[0, 1, 2, 3].map((i) => `.bf${i}{animation:bfk ${cycle}s steps(1,end) infinite;animation-delay:-${fmt(cycle - i * 0.08)}s}`),
     "path{shape-rendering:crispEdges}",
@@ -5043,7 +5596,7 @@ function render5(ctx) {
   ].join("\n");
   return { width: field.width, height: field.height, css, defs: defs.join("") + glowDefs(theme), body: parts.join("\n") };
 }
-var invaders = { id: "invaders", title: "Space Invaders", render: render5 };
+var invaders = { id: "invaders", title: "Space Invaders", render: render6 };
 
 // src/games/pacman.ts
 var LANE = 1;
@@ -5447,14 +6000,14 @@ function toggleFrames(intervals, duration, on = "opacity:1", off = "opacity:0") 
     if (last && a <= last[1] + 1e-6) last[1] = Math.max(last[1], b);
     else merged.push([a, b]);
   }
-  const frames2 = [];
-  if (merged.length === 0 || merged[0][0] > 0) frames2.push([0, off]);
+  const frames = [];
+  if (merged.length === 0 || merged[0][0] > 0) frames.push([0, off]);
   for (const [a, b] of merged) {
-    if (a > 0) frames2.push([a, off]);
-    frames2.push([a, on], [b, on]);
-    if (b < duration - 1e-6) frames2.push([b, off]);
+    if (a > 0) frames.push([a, off]);
+    frames.push([a, on], [b, on]);
+    if (b < duration - 1e-6) frames.push([b, off]);
   }
-  return frames2;
+  return frames;
 }
 function simplify2(wps) {
   const out = [wps[0]];
@@ -5510,7 +6063,7 @@ function mixColors(a, b, k) {
 var SPRITE = 1.28;
 var MAZE_FLASH_BEATS = 4;
 var MAZE_FLASH_BEAT = 0.25;
-function render6(ctx) {
+function render7(ctx) {
   const { grid, theme } = ctx;
   const dark = isDark3(theme);
   const layout = arcadeLayout(grid);
@@ -5537,10 +6090,10 @@ function render6(ctx) {
     [duration, "opacity:1"]
   ];
   const moveFrames = (wps, jumpAt) => {
-    const frames2 = simplify2(wps).map((p) => [at(p.t), translate(...px(p.x, p.y))]);
+    const frames = simplify2(wps).map((p) => [at(p.t), translate(...px(p.x, p.y))]);
     const last = wps[wps.length - 1];
-    frames2.push([jumpAt, translate(...px(last.x, last.y))], [jumpAt, translate(...px(wps[0].x, wps[0].y))]);
-    return frames2;
+    frames.push([jumpAt, translate(...px(last.x, last.y))], [jumpAt, translate(...px(wps[0].x, wps[0].y))]);
+    return frames;
   };
   const flashStart = tEnd + 0.05;
   const flashEnd = flashStart + MAZE_FLASH_BEATS * MAZE_FLASH_BEAT;
@@ -5716,7 +6269,7 @@ ${tl.css()}`;
   ].join("\n");
   return { width, height, css, defs, body };
 }
-var pacman = { id: "pacman", title: "Pac-Man", render: render6 };
+var pacman = { id: "pacman", title: "Pac-Man", render: render7 };
 
 // src/games/snake.ts
 var DX2 = [1, 0, -1, 0];
@@ -5890,6 +6443,13 @@ var SPEED_UP_RATIO = 0.55;
 var MIN_STEP = 0.04;
 var MIN_PLAY_FOR_SPEED_UP = 10;
 var EAT_HOLD = 0.15;
+var HALO = [
+  [1.6, 0.07],
+  [1.2, 0.08],
+  [0.8, 0.09],
+  [0.45, 0.1],
+  [0.15, 0.12]
+];
 var EAT_FADE = 0.3;
 function snakeAngle(dir) {
   return dir * 90;
@@ -5918,7 +6478,7 @@ function mixColors2(a, b) {
   const hex = (v) => Math.round(v).toString(16).padStart(2, "0");
   return `#${hex((ra + rb) / 2)}${hex((ga + gb) / 2)}${hex((ba + bb) / 2)}`;
 }
-function render7(ctx) {
+function render8(ctx) {
   const { grid, theme } = ctx;
   const layout = arcadeLayout(grid);
   const { width, height } = layout;
@@ -5957,13 +6517,13 @@ function render7(ctx) {
     dirs.push(dx === 1 ? 0 : dy === 1 ? 1 : dx === -1 ? 2 : 3);
   }
   const moveFrames = (lo, hi, timeOf, stops = []) => {
-    const frames2 = [];
+    const frames = [];
     for (let k = lo; k <= hi; k++) {
       if (k === lo || k === hi || dirs[k - 1] !== dirs[k] || stops.includes(k)) {
-        frames2.push([timeOf(k), translate(...px(sim.path[k]))]);
+        frames.push([timeOf(k), translate(...px(sim.path[k]))]);
       }
     }
-    return frames2;
+    return frames;
   };
   const startPos = px(sim.path[0]);
   const endPos = px(sim.path[lastStep]);
@@ -6001,77 +6561,137 @@ function render7(ctx) {
     [duration, "opacity:1"]
   ]);
   const growth = sim.eats.filter((e) => e.grew);
-  const growTime = (m) => at(growth[m - 1].step);
+  const growTimes = growth.map((g) => at(g.step));
   const taperShape = (e) => e < TAPER.length ? TAPER[e] : 1;
   const rim = dark ? theme.surface : theme.ink;
   const rimOpacity = dark ? 1 : 0.8;
+  const fills = growth.map((g) => spriteColor(theme, g.cell));
+  const fillOf = (i) => fills[i - 1];
+  const jointOf = (i) => i === 1 ? fills[0] : mixColors2(fills[i - 2], fills[i - 1]);
   const pitch = Math.abs(px(1)[0] - px(0)[0]);
-  const reach = Math.ceil(lastStep * pitch) + pitch;
-  const route = [];
+  const routeLength = lastStep * pitch;
+  const corners = [];
   for (let k = 0; k <= lastStep; k++) {
-    if (k === 0 || k === lastStep || dirs[k - 1] !== dirs[k]) {
-      const [x, y] = px(sim.path[k]);
-      route.push(`${route.length ? "L" : "M"}${fmt(x)} ${fmt(y)}`);
+    if (k === 0 || k === lastStep || dirs[k - 1] !== dirs[k]) corners.push(px(sim.path[k]));
+  }
+  const pathOf = (points) => points.map(([x, y], i) => i === 0 ? `M${fmt(x)} ${fmt(y)}` : y === points[i - 1][1] ? `H${fmt(x)}` : `V${fmt(y)}`).join("");
+  const forward = pathOf(corners);
+  const backward = pathOf([...corners].reverse());
+  const dash = pitch / 2;
+  const gapTail = routeLength + 1e3;
+  const forwardPath = (attrs) => `<path d="${forward}" fill="none" stroke-dasharray="${fmt(dash)} ${fmt(gapTail)}" stroke-linecap="round" stroke-linejoin="round" ${attrs}/>`;
+  const backwardPath = (attrs) => `<path d="${backward}" fill="none" stroke-linejoin="round" ${attrs}/>`;
+  const knots = [[at(0), 0]];
+  for (const p of phases.slice(1)) knots.push([at(p.from), p.from]);
+  knots.push([at(lastStep), lastStep]);
+  const headStep = (t) => {
+    if (t <= knots[0][0]) return 0;
+    for (let k = 1; k < knots.length; k++) {
+      const [t1, s1] = knots[k];
+      if (t > t1) continue;
+      const [t0, s0] = knots[k - 1];
+      return s0 + (t - t0) / (t1 - t0) * (s1 - s0);
+    }
+    return lastStep;
+  };
+  const grownBy = (t) => growTimes.filter((g) => g <= t).length;
+  const vanish = fadeEnd + 0.01;
+  const sampleTimes = (extra) => [.../* @__PURE__ */ new Set([0, ...knots.map((k) => k[0]), ...extra, fadeEnd, vanish])].filter((t) => t <= vanish).sort((a, b) => a - b);
+  const statesAt = (t) => {
+    const m = grownBy(t);
+    return growTimes[m - 1] === t ? [m - 1, m] : [m];
+  };
+  const popEnds = growTimes.map((g, k) => Math.min(g + POP, growTimes[k + 1] ?? Infinity));
+  const tailTimes = sampleTimes([...growTimes, ...popEnds]);
+  const tailSlot = (e, size, color) => {
+    const frames = [];
+    for (const t of tailTimes) {
+      for (const m of statesAt(t)) {
+        const i = m - Math.floor(e / 2);
+        const offset = `stroke-dashoffset:${fmt(dash / 2 - (headStep(t) - (m - e / 2)) * pitch)}px`;
+        const stroke = color(Math.max(i, 1));
+        const paint = stroke ? `;stroke:${stroke}` : "";
+        if (i < 1 || t >= vanish) {
+          frames.push([t, `opacity:0;stroke-width:${fmt(size * 0.2)};${offset}${paint}`]);
+          continue;
+        }
+        const g = growTimes[m - 1];
+        const end2 = popEnds[m - 1];
+        const f = t >= end2 ? 1 : (t - g) / (end2 - g);
+        const from = e < 2 ? 0.2 : taperShape(e - 2);
+        const opacity = e < 2 ? f : 1;
+        frames.push([t, `opacity:${fmt(opacity)};stroke-width:${fmt(size * (from + (taperShape(e) - from) * f))};${offset}${paint}`]);
+      }
+    }
+    return tl.track(frames);
+  };
+  const tailTube = [];
+  const tailRim = [];
+  if (growth.length > 0) {
+    for (let e = 0; e < TAPER.length; e++) {
+      tailTube.push(forwardPath(`class="${tailSlot(e, BODY, (i) => e % 2 ? jointOf(i) : fillOf(i))}"`));
+      tailRim.push(forwardPath(`class="${tailSlot(e, BODY + 2 * OUTLINE2, () => null)}" stroke="${rim}"`));
     }
   }
-  const dash = pitch / 2;
-  const along = (steps) => `stroke-dashoffset:${fmt(dash / 2 - steps * pitch)}px`;
-  const copies = phases.map((phase, j) => {
-    const lo = j === 0 ? 0 : Math.max(0, phase.from - growth.length - 2);
-    const hi = j + 1 < phases.length ? phases[j + 1].from : lastStep;
-    const tLo = atIn(j, lo);
-    const frames2 = tLo >= 0 ? [[tLo, along(lo)], [atIn(j, hi), along(hi)]] : [[0, along(lo - tLo / phase.s)], [atIn(j, hi), along(hi)]];
-    return { track: tl.keyframes(frames2), s: phase.s };
-  });
-  const gates = copies.map((_, j) => {
-    if (copies.length === 1) return "";
-    const switchAt = starts[1];
-    return tl.track(
-      j === 0 ? [[0, "opacity:1"], [switchAt, "opacity:1"], [switchAt, "opacity:0"]] : [[0, "opacity:0"], [switchAt, "opacity:0"], [switchAt, "opacity:1"]]
-    );
-  });
-  const tube = copies.map(() => []);
-  const shadow = copies.map(() => []);
-  for (let i = growth.length; i >= 1; i--) {
-    const look = (size, odd) => {
-      const width2 = (scale) => `stroke-width:${fmt(size * scale)}`;
-      const frames2 = [[0, `opacity:0;${width2(0.2)}`]];
-      for (let j = 0; 2 * j <= TAPER.length; j++) {
-        const m = i + j;
-        if (m > growth.length) break;
-        const start = growTime(m);
-        const next = m + 1 <= growth.length ? growTime(m + 1) : Infinity;
-        const end2 = Math.min(start + POP, next);
-        const from = j === 0 ? `opacity:0;${width2(0.2)}` : `opacity:1;${width2(taperShape(2 * j - 2 + odd))}`;
-        frames2.push([start, from], [end2, `opacity:1;${width2(taperShape(2 * j + odd))}`]);
-      }
-      frames2.push([fadeEnd, frames2[frames2.length - 1][1]], [fadeEnd + 0.01, "opacity:0"]);
-      return tl.track(frames2);
-    };
-    const looks = [look(BODY, 0), look(BODY, 1), look(BODY + 2 * OUTLINE2, 0), look(BODY + 2 * OUTLINE2, 1)];
-    const fill = spriteColor(theme, growth[i - 1].cell);
-    const joint = i === 1 ? fill : mixColors2(spriteColor(theme, growth[i - 2].cell), fill);
-    copies.forEach((copy, j) => {
-      const pos = tl.useKeyframes(copy.track, i * copy.s);
-      const bridge = tl.useKeyframes(copy.track, (i - 0.5) * copy.s);
-      const piece = (look2, cls, color) => `<g class="${look2}"><use class="${cls}" href="#body-route" stroke="${color}"/></g>`;
-      tube[j].push(piece(looks[0], pos, fill), piece(looks[1], bridge, joint));
-      shadow[j].push(piece(looks[2], pos, rim), piece(looks[3], bridge, rim));
-    });
+  const mainCount = (m) => Math.max(0, m - TAPER.length / 2);
+  const mainTube = [];
+  for (let i = mainCount(growth.length); i >= 1; i--) {
+    const joins = growTimes[i + TAPER.length / 2 - 1];
+    const shown = tl.track([
+      [0, "opacity:0"],
+      [joins, "opacity:0"],
+      [joins, "opacity:1"],
+      [fadeEnd, "opacity:1"],
+      [vanish, "opacity:0"]
+    ]);
+    for (const [lag, color] of [[i, fillOf(i)], [i - 0.5, jointOf(i)]]) {
+      const pattern = [0, lag * pitch - dash / 2, dash, gapTail].map(fmt).join(" ");
+      mainTube.push(backwardPath(`class="${shown}" stroke="${color}" stroke-dasharray="${pattern}"`));
+    }
   }
-  const gated = (parts) => parts.map((p, j) => gates[j] ? `<g class="${gates[j]}">${p.join("")}</g>` : p.join("")).join("");
-  const dashing = `stroke-dasharray="${fmt(dash)} ${reach}"`;
+  const rimFrames = (m) => `stroke-dasharray:${mainCount(m) > 0 ? fmt(mainCount(m) * pitch + dash / 2) : 0} ${fmt(gapTail)}`;
+  const mainRim = mainCount(growth.length) > 0 ? backwardPath(`class="${tl.track([
+    [0, rimFrames(0)],
+    ...growTimes.flatMap((g, k) => [[g, rimFrames(k)], [g, rimFrames(k + 1)]]),
+    [fadeEnd, rimFrames(growth.length)],
+    [vanish, rimFrames(0)]
+  ])}" stroke="${rim}" stroke-width="${BODY + 2 * OUTLINE2}"`) : "";
+  const haloFrames = (m, opacity) => `opacity:${m > 0 ? opacity : 0};stroke-dasharray:${fmt(Math.max(0, m - 2.5) * pitch)} ${fmt(gapTail)}`;
+  const halos = theme.glow > 0 && growth.length > 0 ? HALO.map(
+    ([reach, opacity]) => backwardPath(
+      `class="${tl.track([
+        [0, haloFrames(0, opacity)],
+        ...growTimes.flatMap((g, k) => [[g, haloFrames(k, opacity)], [g, haloFrames(k + 1, opacity)]]),
+        [fadeEnd, haloFrames(growth.length, opacity)],
+        [vanish, haloFrames(0, opacity)]
+      ])}" stroke="${theme.sprites[1]}" stroke-linecap="round" stroke-width="${fmt(BODY + 2 * (OUTLINE2 + reach * theme.glow))}"`
+    )
+  ).join("") : "";
+  const followHead = tl.keyframes(
+    sampleTimes([]).map((t) => [t, `stroke-dashoffset:${fmt((headStep(t) - lastStep) * pitch)}px`])
+  );
+  const mainGroup = (inner) => inner ? `<g class="${tl.useKeyframes(followHead, 0)}">${inner}</g>` : "";
   const baseCells = [];
   const foodCells = [];
   const pops = [];
   const eatTime = /* @__PURE__ */ new Map();
   for (const e of sim.eats) eatTime.set(e.cell, at(e.step));
-  const popFrames = [
-    [0, "opacity:1;transform:scale(.6)"],
-    [EAT_HOLD, "opacity:1;transform:scale(1)"],
-    [EAT_HOLD + EAT_FADE, "opacity:0;transform:scale(2.3)"]
-  ];
-  const popTrack = tl.keyframes(popFrames);
+  const popSlots = [];
+  const popLook = (x, y, s, o) => `opacity:${o};${translate(x, y, `scale(${s})`)}`;
+  const addPop = (te, x, y) => {
+    let slot = popSlots.find((p) => p.free <= te);
+    if (!slot) {
+      slot = { free: 0, frames: [[0, popLook(x, y, 2.3, 0)]], x, y };
+      popSlots.push(slot);
+    }
+    slot.frames.push(
+      [te, popLook(slot.x, slot.y, 2.3, 0)],
+      [te, popLook(x, y, 0.6, 1)],
+      [te + EAT_HOLD, popLook(x, y, 1, 1)],
+      [te + EAT_HOLD + EAT_FADE, popLook(x, y, 2.3, 0)]
+    );
+    Object.assign(slot, { free: te + EAT_HOLD + EAT_FADE, x, y });
+  };
   const bigTrack = tl.keyframes([
     [0, "opacity:1;transform:scale(.5)"],
     [0.2, "opacity:1;transform:scale(1.4)"],
@@ -6098,10 +6718,15 @@ function render7(ctx) {
       ]);
       foodCells.push(cellRect(layout, cell, fill, `class="${cls}"`));
       const [cx, cy] = cellCenter(layout, cell.x, cell.y);
-      const big = cell === lastEat;
-      const pop = tl.useKeyframes(big ? bigTrack : popTrack, te);
-      pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><use class="${pop}" href="#${big ? "pop-big" : "pop"}"/></g>`);
+      if (cell !== lastEat) {
+        addPop(te, cx, cy);
+        continue;
+      }
+      pops.push(`<g transform="translate(${fmt(cx)} ${fmt(cy)})"><use class="${tl.useKeyframes(bigTrack, te)}" href="#pop-big"/></g>`);
     }
+  }
+  for (const slot of [...popSlots].sort((a, b) => a.free - b.free)) {
+    pops.push(`<use class="${tl.track(slot.frames)}" href="#pop"/>`);
   }
   const spark = (n, radius, size) => Array.from({ length: n }, (_, k) => {
     const a = k / n * Math.PI * 2 + 0.3;
@@ -6109,7 +6734,7 @@ function render7(ctx) {
     return `<circle cx="${fmt(Math.cos(a) * radius)}" cy="${fmt(Math.sin(a) * radius)}" r="${size}" fill="${fill}"/>`;
   }).join("");
   const flash = dark ? "#ffffff" : theme.accent;
-  const defs = glowDefs(theme) + `<g id="pop"><circle r="7" fill="none" stroke="${flash}" stroke-width="1.4"/>${spark(8, 7, 1.7)}</g>` + (growth.length > 0 ? `<path id="body-route" d="${route.join("")}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>` : "") + `<g id="pop-big"><circle r="8" fill="none" stroke="${flash}" stroke-width="2"/><circle r="5" fill="none" stroke="${theme.accent}" stroke-width="2"/>${spark(12, 8, 2.1)}</g>`;
+  const defs = glowDefs(theme) + `<g id="pop"><circle r="7" fill="none" stroke="${flash}" stroke-width="1.4"/>${spark(8, 7, 1.7)}</g><g id="pop-big"><circle r="8" fill="none" stroke="${flash}" stroke-width="2"/><circle r="5" fill="none" stroke="${theme.accent}" stroke-width="2"/>${spark(12, 8, 2.1)}</g>`;
   const clears = sim.eats.map((e) => ({ t: at(e.step), cell: e.cell }));
   const bar = hud(tl, grid, { theme, title: "SNAKE", clears, resetAt: restore, width });
   const end = hasPlay ? banner(tl, {
@@ -6120,7 +6745,7 @@ function render7(ctx) {
     from: PACE.intro + play + 0.1,
     to: restore
   }) : "";
-  const head = `<g class="${headPos}"><g class="${headTurn}"><g class="${headWiggle}">
+  const head = `<g class="${headPos}"${glowAttr(theme)}><g class="${headTurn}"><g class="${headWiggle}">
 <rect x="${-HEAD / 2}" y="${-HEAD / 2}" width="${HEAD}" height="${HEAD}" rx="${HEAD * 0.42}" fill="${theme.accent}" stroke="${rim}" stroke-opacity="${rimOpacity}" stroke-width="${OUTLINE2}"/>
 <circle cx="2.6" cy="-3.4" r="2.4" fill="#fff"/><circle cx="2.6" cy="3.4" r="2.4" fill="#fff"/>
 <circle cx="3.4" cy="-3.4" r="1.2" fill="#111"/><circle cx="3.4" cy="3.4" r="1.2" fill="#111"/>
@@ -6129,14 +6754,14 @@ function render7(ctx) {
   const bodyMarkup = [
     `<g>${baseCells.join("")}</g>`,
     `<g>${foodCells.join("")}</g>`,
-    `<g class="${snakeFade}"${glowAttr(theme)}><g ${dashing}><g opacity="${rimOpacity}">${gated(shadow)}</g>${gated(tube)}</g>${head}</g>`,
+    `<g class="${snakeFade}">${mainGroup(halos)}<g opacity="${rimOpacity}">${tailRim.join("")}${mainGroup(mainRim)}</g>${tailTube.join("")}<g stroke-width="${BODY}" stroke-linecap="round">${mainGroup(mainTube.join(""))}</g>${head}</g>`,
     `<g>${pops.join("")}</g>`,
     bar,
     end
   ].join("\n");
   return { width, height, css: tl.css(), defs, body: bodyMarkup };
 }
-var snake = { id: "snake", title: "Snake", render: render7 };
+var snake = { id: "snake", title: "Snake", render: render8 };
 
 // src/games/tetris.ts
 var SHAPES = {
@@ -6702,7 +7327,7 @@ function renderTetris(ctx, play) {
   const tl = new Timeline(D, "t");
   const pal = paletteFor3(theme);
   const eps = 1e-3;
-  const emit = (frames2) => tl.track(frames2.map(([t, css]) => [t + shift, css]));
+  const emit = (frames) => tl.track(frames.map(([t, css]) => [t + shift, css]));
   const tiles = [];
   for (const col of grid.cells) {
     for (const c of col) if (c) tiles.push(cellRect(layout, c, theme.empty));
@@ -6783,12 +7408,12 @@ function linesReadout(tl, play, theme, restore) {
     for (const s of shown) if (!runs.length || runs[runs.length - 1].ch !== s.ch) runs.push(s);
     for (const ch of new Set(runs.map((r) => r.ch).filter((c) => c !== " "))) {
       const glyph = pixelText(ch, scale);
-      const frames2 = [];
+      const frames = [];
       runs.forEach((r, i) => {
-        if (i > 0) frames2.push([r.t, runs[i - 1].ch === ch ? "opacity:1" : "opacity:0"]);
-        frames2.push([r.t, r.ch === ch ? "opacity:1" : "opacity:0"]);
+        if (i > 0) frames.push([r.t, runs[i - 1].ch === ch ? "opacity:1" : "opacity:0"]);
+        frames.push([r.t, r.ch === ch ? "opacity:1" : "opacity:0"]);
       });
-      out.push(`<path class="${tl.track(frames2)}" d="${glyph.d}" transform="translate(${fmt(digitsX + pos * advance)} ${fmt(y)})" fill="${theme.ink}"/>`);
+      out.push(`<path class="${tl.track(frames)}" d="${glyph.d}" transform="translate(${fmt(digitsX + pos * advance)} ${fmt(y)})" fill="${theme.ink}"/>`);
     }
   }
   return `<g class="lines">${out.join("")}</g>`;
@@ -7170,9 +7795,10 @@ function paletteFor4(theme) {
   }
   return { player: "#0969da", rival: "#e5580c", grid: "#cfd6de", gridOpacity: 0.8, border: "#0969da", glowStrength: 0 };
 }
+var CLEAR_GROUP = 14;
 var TRAIL_WIDTH = 4.4;
 var CORE_WIDTH = 1.7;
-function render8(ctx) {
+function render9(ctx) {
   const { grid, theme } = ctx;
   const layout = arcadeLayout(grid);
   const { width, height } = layout;
@@ -7196,8 +7822,10 @@ function render8(ctx) {
   for (let c = arena.c0; c <= arena.c1 + 1; c++) lines.push(`M${fmt(layout.left + c * layout.pitch - half)} ${fmt(gy0)}V${fmt(gy1)}`);
   for (let r = ARENA_TOP; r <= ARENA_BOTTOM + 1; r++) lines.push(`M${fmt(gx0)} ${fmt(layout.top + r * layout.pitch - half)}H${fmt(gx1)}`);
   const gridMarkup = `<path d="${lines.join("")}" fill="none" stroke="${pal.grid}" stroke-opacity="${pal.gridOpacity}" stroke-width="1"/><rect x="${fmt(gx0)}" y="${fmt(gy0)}" width="${fmt(gx1 - gx0)}" height="${fmt(gy1 - gy0)}" rx="3" fill="none" stroke="${pal.border}" stroke-opacity="${dark ? 0.55 : 0.5}" stroke-width="1.6"/>`;
-  const filter = pal.glowStrength > 0 ? `<filter id="tron-glow" filterUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${height}"><feGaussianBlur in="SourceGraphic" stdDeviation="${fmt(theme.glow * 0.9)}" result="a"/><feGaussianBlur in="SourceGraphic" stdDeviation="${fmt(theme.glow * 2.6)}" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="a"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` : "";
-  const glow = pal.glowStrength > 0 ? ` filter="url(#tron-glow)"` : "";
+  const glowing = pal.glowStrength > 0;
+  const trailAlpha = dark ? 0.9 : 1;
+  const filter = glowing ? `<filter id="tron-glow" filterUnits="userSpaceOnUse" x="0" y="0" width="${width}" height="${height}"><feGaussianBlur in="SourceGraphic" stdDeviation="${fmt(theme.glow * 0.9)}" result="a"/><feGaussianBlur in="SourceGraphic" stdDeviation="${fmt(theme.glow * 2.6)}" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="a"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` : "";
+  const glow = glowing ? ` filter="url(#tron-glow)"` : "";
   const bursts = new Bursts(duration);
   const pixels = [
     [-14, -14],
@@ -7209,87 +7837,90 @@ function render8(ctx) {
     [0, 18],
     [14, 14]
   ].map(([dx, dy]) => ({ dx, dy, size: 4.4 }));
-  bursts.define("derez", { life: 0.55, sparks: pixels });
   const crackle = Array.from({ length: 20 }, (_, i) => {
     const a = i / 20 * Math.PI * 2 + 0.2;
     const r = 26 + i * 7 % 5 * 5;
     return { dx: Math.cos(a) * r, dy: Math.sin(a) * r, size: 4 + i % 3 };
   });
-  bursts.define("crash", { life: 1.1, sparks: crackle, ring: 28, ringWidth: 2.6, flash: 9, flashColor: "#ffffff" });
-  bursts.define("crashRing", { life: 0.8, sparks: [], ring: 40, ringWidth: 1.8 });
+  const burstShapes = {
+    derez: { life: 0.55, sparks: pixels },
+    crash: { life: 1.1, sparks: crackle, ring: 28, ringWidth: 2.6, flash: 9, flashColor: "#ffffff" },
+    crashRing: { life: 0.8, sparks: [], ring: 40, ringWidth: 1.8 }
+  };
+  for (const [id, shape] of Object.entries(burstShapes)) bursts.define(id, shape);
+  const burstDef = (id, shape) => {
+    const parts = [];
+    if (shape.flash) parts.push(`<circle r="${fmt(shape.flash)}" fill="${shape.flashColor ?? "#fff"}"/>`);
+    if (shape.ring) parts.push(`<circle r="${fmt(shape.ring)}" fill="none" stroke="currentColor" stroke-width="${shape.ringWidth ?? 1.6}"/>`);
+    for (const s of shape.sparks) {
+      parts.push(`<rect x="${fmt(s.dx - s.size / 2)}" y="${fmt(s.dy - s.size / 2)}" width="${fmt(s.size)}" height="${fmt(s.size)}" fill="currentColor"/>`);
+    }
+    return `<g id="fx-${id}">${parts.join("")}</g>`;
+  };
   const cells = [];
   for (const column of grid.cells) for (const cell of column) if (cell) cells.push(cellRect(layout, cell, theme.empty));
   const body = [];
   const clears = [];
   const dayMarkup = [];
-  const burstMarkup = [];
   const trailMarkup = [];
   const cycleMarkup = [];
   const cycleDef = (color) => {
     const edge = dark ? "#ffffff" : theme.ink;
     return `<g transform="scale(1.3)"><path d="M-10 -3.4H5Q10.5 -3.4 10.5 0T5 3.4H-10Z" fill="${color}" stroke="${edge}" stroke-opacity="${dark ? 0.9 : 0.7}" stroke-width="1"/><rect x="-11.5" y="-4.6" width="4" height="9.2" rx="1.6" fill="${mix3(color, "#000000", 0.45)}"/><rect x="5" y="-4.2" width="4" height="8.4" rx="1.6" fill="${mix3(color, "#000000", 0.45)}"/><ellipse cx="-0.5" cy="0" rx="4.4" ry="2" fill="#ffffff" fill-opacity=".92"/><rect x="9" y="-1.2" width="2.6" height="2.4" fill="#ffffff"/></g>`;
   };
-  const defs = filter + `<g id="cyc0">${cycleDef(pal.player)}</g><g id="cyc1">${cycleDef(pal.rival)}</g>` + bursts.defs();
   if (sim) {
     const point = (id) => cellCenter(layout, ...cellCoord(sim.arena, id));
     const jumpAt = restore + 0.3;
-    const trailGroups = [];
+    const trailBodies = [];
     sim.cycles.forEach((cy2, which) => {
       const color = which === 0 ? pal.player : pal.rival;
       const core = dark ? "#ffffff" : mix3(color, "#ffffff", 0.55);
       const n = cy2.cells.length;
       const dirsOf = (i) => directionOf(sim.arena, cy2.cells[i - 1], cy2.cells[i]);
       const dtAt = (i) => i + 1 < n ? cy2.head[i + 1] - cy2.head[i] : i > 0 ? cy2.head[i] - cy2.head[i - 1] : 1;
-      let a = 0;
-      while (a < n - 1) {
-        let b = a + 1;
-        const d = dirsOf(b);
-        while (b + 1 < n && dirsOf(b + 1) === d) b++;
-        const [sx, sy] = point(cy2.cells[a]);
-        const len = (b - a) * layout.pitch;
-        const ext = len + TRAIL_WIDTH;
-        const gOf = (i) => ((i - a) * layout.pitch + TRAIL_WIDTH) / ext;
-        const fixedHead = (t) => {
-          if (t <= cy2.head[a]) return 0;
-          if (t >= cy2.head[b]) return 1;
-          let i = a;
-          while (i + 1 < b && cy2.head[i + 1] <= t) i++;
-          const f = (t - cy2.head[i]) / (cy2.head[i + 1] - cy2.head[i]);
-          return gOf(i) + (gOf(i + 1) - gOf(i)) * f;
-        };
-        const tailPos = (t) => {
-          if (t <= cy2.tail[a]) return 0;
-          let i = a;
-          while (i < b && cy2.tail[i + 1] <= t) i++;
-          if (i >= b) return 1;
-          const span = cy2.tail[i + 1] - cy2.tail[i];
-          const f = Number.isFinite(span) && span > 0 ? (t - cy2.tail[i]) / span : 0;
-          return (i - a + f) * layout.pitch / ext;
-        };
-        const times = /* @__PURE__ */ new Set([cy2.head[a], cy2.head[b]]);
-        for (let i = a + 1; i < b; i++) if (Math.abs(dtAt(i) - dtAt(i - 1)) > 1e-6) times.add(cy2.head[i]);
-        let tailEnds = false;
-        for (let i = a; i <= b; i++) {
-          const t = cy2.tail[i];
-          if (!Number.isFinite(t)) break;
-          if (i === a || i === b || Math.abs(cy2.tail[Math.min(i + 1, n - 1)] - t - (t - cy2.tail[Math.max(i - 1, 0)])) > 1e-6) times.add(t);
-          if (i === b) tailEnds = true;
-        }
-        const css = (g, dd) => `transform:translate(${fmt(dd * ext)}px,0) scale(${fmt(Math.max(0, g - dd))},1)`;
-        const frames2 = [[0, css(0, 0)]];
-        const sorted = [...times].sort((p, q) => p - q);
-        for (const t of sorted) {
-          if (t === cy2.head[a]) frames2.push([T(t), css(0, 0)]);
-          frames2.push([T(t), css(fixedHead(t), tailPos(t))]);
-        }
-        if (tailEnds && Number.isFinite(cy2.tail[b])) frames2.push([T(cy2.tail[b]), css(1, 1)]);
-        const cls = tl.track(frames2);
-        const angle2 = d * 90;
-        trailGroups.push(
-          `<g transform="translate(${fmt(sx - TRAIL_WIDTH / 2 * DX3[d])} ${fmt(sy - TRAIL_WIDTH / 2 * DY3[d])}) rotate(${angle2})"><g class="${cls}"><rect x="0" y="${-TRAIL_WIDTH / 2}" width="${fmt(ext)}" height="${TRAIL_WIDTH}" rx="1" fill="${color}" fill-opacity="${dark ? 0.9 : 1}"/><rect x="0" y="${-CORE_WIDTH / 2}" width="${fmt(ext)}" height="${CORE_WIDTH}" fill="${core}"/></g></g>`
-        );
-        a = b;
+      const pts = cy2.cells.map(point);
+      const d = [`M${fmt(pts[0][0])} ${fmt(pts[0][1])}`];
+      for (let i = 1; i < n; i++) {
+        const straight = i + 1 < n && (pts[i + 1][0] - pts[i][0]) * (pts[i][1] - pts[i - 1][1]) === (pts[i + 1][1] - pts[i][1]) * (pts[i][0] - pts[i - 1][0]);
+        if (!straight) d.push(`L${fmt(pts[i][0])} ${fmt(pts[i][1])}`);
       }
+      const path = d.join("");
+      const pitch = layout.pitch;
+      const total = (n - 1) * pitch;
+      const line = (times) => {
+        const all = times.map((time, i) => [T(time), i * pitch]).filter(([time]) => Number.isFinite(time));
+        return all.filter((pt, i) => {
+          if (i === 0 || i === all.length - 1) return true;
+          const [t0, a0] = all[i - 1];
+          const [t1, a1] = all[i + 1];
+          return Math.abs((pt[1] - a0) * (t1 - pt[0]) - (a1 - pt[1]) * (pt[0] - t0)) > 1e-7;
+        });
+      };
+      const at = (pts2, time) => {
+        const same = pts2.filter(([pt]) => Math.abs(pt - time) < 1e-9);
+        if (same.length) return [same[0][1], same[same.length - 1][1]];
+        if (time < pts2[0][0]) return [0, 0];
+        if (time > pts2[pts2.length - 1][0]) return [total, total];
+        const i = pts2.findIndex(([pt]) => pt > time);
+        const [t0, a0] = pts2[i - 1];
+        const [t1, a1] = pts2[i];
+        const v = a0 + (a1 - a0) * (time - t0) / (t1 - t0);
+        return [v, v];
+      };
+      const heads = line(cy2.head);
+      const tails = line(cy2.tail);
+      const knots = [.../* @__PURE__ */ new Set([0, duration, ...heads.map(([pt]) => pt), ...tails.map(([pt]) => pt)])].sort((p, q) => p - q);
+      const window = (s, e) => `visibility:${e - s > 1e-6 ? "visible" : "hidden"};stroke-dasharray:${fmt(e - s)}px ${fmt(total + 2 * TRAIL_WIDTH)}px;stroke-dashoffset:${fmt(-s)}px`;
+      const slide = [];
+      for (const time of knots) {
+        const [e0, e1] = at(heads, time);
+        const [s0, s1] = at(tails, time);
+        slide.push([time, window(s0, e0)]);
+        if (s0 !== s1 || e0 !== e1) slide.push([time, window(s1, e1)]);
+      }
+      const keys = tl.keyframes(slide);
+      const stroke = (width2, color2, opacity, cap, join) => `<path class="${tl.useKeyframes(keys, 0)}" d="${path}" fill="none" stroke="${color2}" stroke-opacity="${opacity}" stroke-width="${fmt(width2)}" stroke-linecap="${cap}" stroke-linejoin="${join}"/>`;
+      trailBodies.push(stroke(TRAIL_WIDTH, color, trailAlpha, "square", "miter"), stroke(CORE_WIDTH, core, 1, "square", "miter"));
       const start = point(cy2.cells[0]);
       const end2 = point(cy2.cells[n - 1]);
       const posFrames = [[0, translate(start[0], start[1])]];
@@ -7329,33 +7960,51 @@ function render8(ctx) {
       const visClass = tl.track(vis);
       cycleMarkup.push(`<g class="${visClass}"><g class="${pos}"><g class="${rot}"><use href="#cyc${which}"/></g></g></g>`);
     });
-    trailMarkup.push(`<g>${trailGroups.join("")}</g>`);
+    trailMarkup.push(trailBodies.join(""));
     const cleared = /* @__PURE__ */ new Map();
     for (const e of sim.derez) cleared.set(e.cell, T(e.t));
+    const days = [];
     for (const column of grid.cells) {
       for (const cell of column) {
         if (!cell || cell.level === 0) continue;
-        const fill = levelColor(theme, cell);
-        const flashFill = dark ? mix3(spriteColor(theme, cell), "#ffffff", 0.75) : spriteColor(theme, cell);
         const te = cleared.get(cell);
         if (te === void 0) throw new Error("a day was never reached");
-        const cls = tl.track([
-          [0, `opacity:1;transform:scale(1);fill:${fill}`],
-          [te, `opacity:1;transform:scale(1);fill:${fill}`],
-          [te + 0.05, `opacity:1;transform:scale(1.15);fill:${flashFill}`],
-          [te + 0.22, `opacity:0;transform:scale(1.5);fill:${flashFill}`],
-          [restore, `opacity:0;transform:scale(1);fill:${fill}`],
-          [fadeEnd, `opacity:1;transform:scale(1);fill:${fill}`]
-        ]);
-        dayMarkup.push(cellRect(layout, cell, fill, `class="d ${cls}"`));
-        const [cx2, cy2] = cellCenter(layout, cell.x, cell.y);
-        burstMarkup.push(bursts.use("derez", cx2, cy2, te, spriteColor(theme, cell)));
-        clears.push({ t: te, cell });
+        days.push({ cell, te });
       }
+    }
+    days.sort((p, q) => p.te - q.te);
+    const flashes = [];
+    const half2 = layout.cell / 2;
+    for (let first = 0; first < days.length; first += CLEAR_GROUP) {
+      const members = days.slice(first, first + CLEAR_GROUP);
+      const counter = [[0, "opacity:1;--n:0"]];
+      members.forEach(({ te }, i) => counter.push([te, `opacity:1;--n:${i}`], [te, `opacity:1;--n:${i + 1}`]));
+      counter.push([restore, `opacity:1;--n:${members.length}`], [restore, "opacity:0;--n:0"], [fadeEnd, "opacity:1;--n:0"]);
+      const rects = members.map(({ cell }, i) => cellRect(layout, cell, levelColor(theme, cell), `class="k" style="--i:${i + 1}"`));
+      dayMarkup.push(`<g class="${tl.track(counter)}" style="--n:0">${rects.join("")}</g>`);
+    }
+    for (const { cell, te } of days) {
+      const fill = levelColor(theme, cell);
+      const flashFill = dark ? mix3(spriteColor(theme, cell), "#ffffff", 0.75) : spriteColor(theme, cell);
+      const [cx2, cy2] = cellCenter(layout, cell.x, cell.y);
+      const look = (scale, opacity, color) => `opacity:${opacity};${translate(cx2, cy2, `scale(${scale})`)};fill:${color}`;
+      flashes.push({
+        frames: [
+          [te, look(1, 1, fill)],
+          [te + 0.05, look(1.15, 1, flashFill)],
+          [te + 0.22, look(1.5, 0, flashFill)]
+        ]
+      });
+      bursts.play("derez", cx2, cy2, te, spriteColor(theme, cell));
+      clears.push({ t: te, cell });
+    }
+    for (const frames of pooled2(flashes)) {
+      dayMarkup.push(`<rect class="${tl.track(frames)}" x="${fmt(-half2)}" y="${fmt(-half2)}" width="${layout.cell}" height="${layout.cell}" rx="${layout.radius}"/>`);
     }
     const [cx, cy] = cellCenter(layout, sim.crash.x, sim.crash.y);
     const tc = T(sim.crash.t);
-    burstMarkup.push(bursts.use("crash", cx, cy, tc, pal.rival), bursts.use("crashRing", cx, cy, tc + 0.12, pal.player));
+    bursts.play("crash", cx, cy, tc, pal.rival);
+    bursts.play("crashRing", cx, cy, tc + 0.12, pal.player);
   } else {
     for (const column of grid.cells) {
       for (const cell of column) if (cell && cell.level > 0) dayMarkup.push(cellRect(layout, cell, levelColor(theme, cell)));
@@ -7365,6 +8014,7 @@ function render8(ctx) {
     cycleMarkup.push(`<g transform="translate(${fmt(x)} ${fmt(y)})"><use href="#cyc0"/></g>`);
     cycleMarkup.push(`<g transform="translate(${fmt(x2)} ${fmt(y)}) rotate(180)"><use href="#cyc1"/></g>`);
   }
+  const defs = filter + `<g id="cyc0">${cycleDef(pal.player)}</g><g id="cyc1">${cycleDef(pal.rival)}</g>` + Object.entries(burstShapes).map(([id, shape]) => burstDef(id, shape)).join("");
   const bar = hud(tl, grid, { theme, title: "TRON", clears, resetAt: restore, width });
   const end = sim ? banner(tl, {
     theme,
@@ -7378,18 +8028,33 @@ function render8(ctx) {
     `<g>${gridMarkup}</g>`,
     `<g>${cells.join("")}</g>`,
     `<g>${dayMarkup.join("")}</g>`,
-    `<g${glow}>${trailMarkup.join("")}${cycleMarkup.join("")}${burstMarkup.join("")}</g>`,
+    `<g${glow}>${trailMarkup.join("")}${cycleMarkup.join("")}${sim ? bursts.markup(tl) : ""}</g>`,
     bar,
     end
   );
-  return { width, height, css: `.d{transform-box:fill-box;transform-origin:center}
-${tl.css()}
-${bursts.css()}`, defs, body: body.join("\n") };
+  return { width, height, css: `.k{opacity:clamp(0,calc(var(--i) - var(--n)),1)}
+${tl.css()}`, defs, body: body.join("\n") };
+}
+function pooled2(plays) {
+  const slots = [];
+  for (const play of [...plays].sort((p, q) => p.frames[0][0] - q.frames[0][0])) {
+    const [start] = play.frames[0];
+    const [end, rest] = play.frames[play.frames.length - 1];
+    let slot = slots.find((s) => s.free <= start);
+    if (!slot) {
+      slot = { free: 0, last: rest, frames: [[0, rest]] };
+      slots.push(slot);
+    }
+    slot.frames.push([start, slot.last], ...play.frames);
+    slot.free = end;
+    slot.last = rest;
+  }
+  return slots.map((s) => s.frames);
 }
 function cellCoord(a, id) {
   return [colOf(a, id), rowOf(a, id)];
 }
-var tron = { id: "tron", title: "Tron", render: render8 };
+var tron = { id: "tron", title: "Tron", render: render9 };
 
 // src/games/index.ts
 var GAMES = {
