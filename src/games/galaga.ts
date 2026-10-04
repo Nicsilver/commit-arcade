@@ -2,10 +2,11 @@ import { Timeline, fmt, type Frame } from "../anim.ts";
 import { PACE, loopDuration, restoreAt, type Game, type GameContext, type GameOutput } from "../game.ts";
 import { arcadeLayout, banner, glowAttr, glowDefs, hud, spriteColor, stageClearLines, type ClearEvent } from "../kit.ts";
 import { isDark, mix, pixelSprite } from "../sprite-kit.ts";
-import { cellCenter, cellRect } from "../svg.ts";
+import { cellCenter, cellOrigin } from "../svg.ts";
 import type { Theme } from "../theme.ts";
 import { routeAt, type Route } from "./galaga-path.ts";
 import { BREATH_STEP, FIGHTER_Y, SEP, breathAt, simulateGalaga, type EnemyRec } from "./galaga-sim.ts";
+import { spriteImage } from "./galaga-sprites.ts";
 
 const TARGET_PLAY = 58;
 const MIN_SCALE = 0.6;
@@ -120,12 +121,6 @@ function lookFor(kind: EnemyRec["kind"]): Look {
   return { a: BOSS_A, b: BOSS_B };
 }
 
-function frames(rows: string[], pal: Record<string, string>, outline?: { color: string; width: number }): string {
-  const w = 13 * SPRITE_SCALE;
-  const h = rows.length * SPRITE_SCALE;
-  return `<g transform="translate(${fmt(-w / 2)} ${fmt(-h / 2)})">${pixelSprite(rows, pal, SPRITE_SCALE, outline)}</g>`;
-}
-
 function shipArt(white: boolean, theme: Theme): string {
   const pal = white
     ? { W: "#f4f7ff", R: "#ff3b3b", B: "#3b7bff" }
@@ -144,6 +139,125 @@ function starPoints(r: number, inner: number, points: number): string {
     pts.push(`${fmt(Math.cos(a) * rad)} ${fmt(Math.sin(a) * rad)}`);
   }
   return pts.join(" ");
+}
+
+/** One play of a pooled effect: when it starts, how long it lasts and the frames it runs, relative to that start. */
+interface Beat {
+  t: number;
+  life: number;
+  frames: Frame[];
+}
+
+/**
+ * Spreads plays over as few lanes as possible; a lane is one element that
+ * replays its plays one after another instead of every play owning an element.
+ */
+function packLanes<T extends { t: number; life: number }>(plays: T[]): T[][] {
+  const lanes: T[][] = [];
+  const free: number[] = [];
+  for (const play of [...plays].sort((a, b) => a.t - b.t)) {
+    const i = free.findIndex((end) => end <= play.t);
+    const lane = i < 0 ? lanes.length : i;
+    if (i < 0) lanes.push([]);
+    lanes[lane].push(play);
+    free[lane] = play.t + play.life + 0.002;
+  }
+  return lanes;
+}
+
+/**
+ * Frames for a lane. Between plays the element sits in the state its last
+ * play ended in (invisible), then jumps to the next play's first frame.
+ */
+function laneFrames(beats: Beat[]): Frame[] {
+  const out: Frame[] = [[0, beats[0].frames[beats[0].frames.length - 1][1]]];
+  for (const beat of beats) {
+    out.push([beat.t, out[out.length - 1][1]]);
+    for (const [dt, css] of beat.frames) out.push([beat.t + dt, css]);
+  }
+  return out;
+}
+
+function num(n: number): string {
+  return String(Math.round(n * 1e4) / 1e4);
+}
+
+interface Raw {
+  t: number;
+  x: number;
+  y: number;
+  r: number;
+  op: number;
+}
+
+/** The enemy's state at `t` along its track, interpolated the way the browser will. */
+function poseAt(raw: Raw[], t: number): Raw {
+  const sorted = [...raw].sort((a, b) => Math.round(a.t * 1e5) - Math.round(b.t * 1e5));
+  let i = sorted.length - 1;
+  while (i > 0 && sorted[i].t > t) i--;
+  const a = sorted[i];
+  const b = sorted[i + 1];
+  if (!b || b.t <= a.t) return { ...a, t };
+  const u = (t - a.t) / (b.t - a.t);
+  const lerp = (p: number, q: number) => p + (q - p) * u;
+  return { t, x: lerp(a.x, b.x), y: lerp(a.y, b.y), r: lerp(a.r, b.r), op: lerp(a.op, b.op) };
+}
+
+/**
+ * Drops keys the browser would interpolate to within `tol` (one tolerance per
+ * value) anyway. Keys at the same instant are jumps and always stay.
+ */
+function thin<T extends { t: number }>(keys: T[], values: (key: T) => number[], tol: number[]): T[] {
+  const keep = keys.map(() => false);
+  const same = (a: T, b: T) => Math.round(a.t * 1e5) === Math.round(b.t * 1e5);
+  const run = (first: number, last: number) => {
+    keep[first] = keep[last] = true;
+    const stack: [number, number][] = [[first, last]];
+    while (stack.length) {
+      const [a, b] = stack.pop()!;
+      const va = values(keys[a]);
+      const vb = values(keys[b]);
+      let worst = 1;
+      let at = -1;
+      for (let k = a + 1; k < b; k++) {
+        const u = (keys[k].t - keys[a].t) / (keys[b].t - keys[a].t);
+        const vk = values(keys[k]);
+        const err = Math.max(...vk.map((v, i) => Math.abs(v - (va[i] + (vb[i] - va[i]) * u)) / tol[i]));
+        if (err > worst) {
+          worst = err;
+          at = k;
+        }
+      }
+      if (at < 0) continue;
+      keep[at] = true;
+      stack.push([a, at], [at, b]);
+    }
+  };
+  let first = 0;
+  for (let i = 1; i <= keys.length; i++) {
+    if (i === keys.length || same(keys[i], keys[i - 1])) {
+      if (i - 1 >= first) run(first, i - 1);
+      first = i;
+    }
+  }
+  return keys.filter((_, i) => keep[i]);
+}
+
+/**
+ * Glow filter with a fixed region around the element's own origin. The stock
+ * one is sized from whatever its group holds, which for a pooled element means
+ * everywhere it has ever been.
+ */
+function glowRegion(theme: Theme, id: string, halfWidth: number, halfHeight: number): string {
+  if (theme.glow <= 0) return "";
+  return (
+    `<filter id="${id}" filterUnits="userSpaceOnUse" x="${fmt(-halfWidth)}" y="${fmt(-halfHeight)}" width="${fmt(halfWidth * 2)}" height="${fmt(halfHeight * 2)}">` +
+    `<feGaussianBlur stdDeviation="${fmt(theme.glow)}" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`
+  );
+}
+
+function filterAttr(theme: Theme, id: string): string {
+  return theme.glow > 0 ? ` filter="url(#${id})"` : "";
 }
 
 function render(ctx: GameContext): GameOutput {
@@ -175,12 +289,16 @@ function render(ctx: GameContext): GameOutput {
     const [kind, lv] = key.split(":");
     const level = Number(lv);
     const look = lookFor(kind as EnemyRec["kind"]);
-    defs.push(`<g id="e-${kind}${level}-a">${frames(look.a, enemyPalette(theme, level), outline)}</g>`);
-    defs.push(`<g id="e-${kind}${level}-b">${frames(look.b, enemyPalette(theme, level), outline)}</g>`);
-    if (kind === "boss") {
-      defs.push(`<g id="e-${kind}${level}-c">${frames(look.a, enemyPalette(theme, level, true), outline)}</g>`);
-      defs.push(`<g id="e-${kind}${level}-d">${frames(look.b, enemyPalette(theme, level, true), outline)}</g>`);
-    }
+    const flap = (pal: Record<string, string>) => {
+      const one = (rows: string[], cls: string) => {
+        const w = 13 * SPRITE_SCALE;
+        const h = rows.length * SPRITE_SCALE;
+        return spriteImage(rows, pal, { sigma: theme.glow, cell: SPRITE_SCALE, x: -w / 2, y: -h / 2, outline }, `class="${cls}"`);
+      };
+      return one(look.a, "fa") + one(look.b, "fb");
+    };
+    defs.push(`<g id="e-${kind}${level}">${flap(enemyPalette(theme, level))}</g>`);
+    if (kind === "boss") defs.push(`<g id="e-${kind}${level}h">${flap(enemyPalette(theme, level, true))}</g>`);
   }
   defs.push(`<g id="shipw">${shipArt(true, theme)}</g><g id="shipr">${shipArt(false, theme)}</g>`);
   const boomStroke = dark ? "" : ` stroke="#7a1f10" stroke-width="1" stroke-linejoin="round"`;
@@ -189,24 +307,6 @@ function render(ctx: GameContext): GameOutput {
     `<circle id="br" r="6" fill="none" stroke="#7fe3ff" stroke-width="2"/>`,
     `<path id="bp" d="M-1-12h2v3h-2zM9-9l2 2-2 2-2-2zM11 0h3v2h-3zM8 8l2 2-2 2-2-2zM-1 9h2v3h-2zM-9 8l2 2-2 2-2-2zM-14 0h3v2h-3zM-9-9l2 2-2 2-2-2z"/>`,
   );
-
-  const starKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.3)"],
-    [0.1, "opacity:1;transform:scale(1)"],
-    [0.4, "opacity:0;transform:scale(1.45)"],
-    [duration, "opacity:0;transform:scale(1.45)"],
-  ]);
-  const ringKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.4)"],
-    [0.4, "opacity:0;transform:scale(3.2)"],
-    [duration, "opacity:0;transform:scale(3.2)"],
-  ]);
-  const sparkKf = tl.keyframes([
-    [0, "opacity:1;transform:scale(.5) rotate(0deg)"],
-    [0.55, "opacity:0;transform:scale(2.1) rotate(35deg)"],
-    [duration, "opacity:0;transform:scale(2.1) rotate(35deg)"],
-  ]);
-  const bulletKfs = new Map<string, string>();
 
   // Stars: three drifting layers, each a set of tiny twinkling dots drawn twice so the scroll tiles.
   const starColors = dark ? ["#ff7a7a", "#7ad0ff", "#ffe27a", "#ffffff", "#8dffa8", "#cfa0ff"] : ["#d9534f", "#2f8fd4", "#c79a00", "#6a6f85", "#2fa05a", "#8250df"];
@@ -221,16 +321,25 @@ function render(ctx: GameContext): GameOutput {
       const color = starColors[Math.floor(rng() * starColors.length)];
       const tw = `tw${Math.floor(rng() * 3)}`;
       const delay = fmt(-rng() * 3);
-      const s = sizes[li];
-      for (const dy of [0, -layout.height]) {
-        dots.push(`<rect class="${tw}" style="animation-delay:${delay}s" x="${x}" y="${fmt(y + dy)}" width="${s}" height="${s}" fill="${color}"/>`);
-      }
+      const side = fmt(sizes[li]);
+      const dot = (dy: number) => `M${x} ${fmt(y + dy)}h${side}v${side}h-${side}z`;
+      dots.push(`<path class="${tw}" style="animation-delay:${delay}s" d="${dot(0)}${dot(-layout.height)}" fill="${color}"/>`);
     }
     layers.push(`<g class="sc" style="animation-duration:${fmt(layout.height / speeds[li])}s">${dots.join("")}</g>`);
   }
 
-  const tiles: string[] = [];
-  for (const column of grid.cells) for (const cell of column) if (cell) tiles.push(cellRect(layout, cell, theme.empty));
+  // One path for the whole graph: hundreds of separate rects cost a draw call each, every frame.
+  const r = layout.radius;
+  const inner = layout.cell - r * 2;
+  const tiles = [`<path fill="${theme.empty}" d="`];
+  for (const column of grid.cells) {
+    for (const cell of column) {
+      if (!cell) continue;
+      const [x, y] = cellOrigin(layout, cell.x, cell.y);
+      tiles.push(`M${fmt(x + r)} ${fmt(y)}h${inner}a${r} ${r} 0 0 1 ${r} ${r}v${inner}a${r} ${r} 0 0 1-${r} ${r}h-${inner}a${r} ${r} 0 0 1-${r}-${r}v-${inner}a${r} ${r} 0 0 1 ${r}-${r}z`);
+    }
+  }
+  tiles.push('"/>');
 
   // Formation.
   const css = (x: number, y: number, r: number, op = 1) => `opacity:${op};transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(r)}deg)`;
@@ -239,14 +348,6 @@ function render(ctx: GameContext): GameOutput {
   const lookId = (e: EnemyRec) => `e-${e.kind}${e.kind === "bee" ? e.cell.level : e.kind === "butterfly" ? 3 : 4}`;
   const enemyEls: string[] = [];
   const clears: ClearEvent[] = [];
-
-  interface Raw {
-    t: number;
-    x: number;
-    y: number;
-    r: number;
-    op: number;
-  }
 
   const routeRaw = (route: Route, start: number, upTo: number | null, raw: Raw[]) => {
     for (let i = 0; i < route.t.length; i++) {
@@ -261,7 +362,7 @@ function render(ctx: GameContext): GameOutput {
 
   for (const e of sim.enemies) {
     const [sx, sy] = e.slot;
-    const raw: Raw[] = [{ t: 0, x: sx, y: sy, r: 0, op: 1 }];
+    let raw: Raw[] = [{ t: 0, x: sx, y: sy, r: 0, op: 1 }];
     const rest = (t: number, op = 1) => raw.push({ t, x: sx, y: sy, r: 0, op });
     const isCaptor = capture !== null && capture.boss === e.id;
     let dives = e.dives;
@@ -293,29 +394,44 @@ function render(ctx: GameContext): GameOutput {
     }
     rest(restore, 0);
     rest(fadeEnd);
+    raw.sort((a, b) => Math.round(a.t * 1e5) - Math.round(b.t * 1e5));
+    raw = thin(raw, (q) => [q.x, q.y, q.r, q.op], [0.04, 0.04, 0.15, 0.002]);
 
     const id = lookId(e);
-    const flap = (suffix: string[]) => `<use href="#${id}-${suffix[0]}" class="fa"/><use href="#${id}-${suffix[1]}" class="fb"/>`;
+    const pose = (q: Raw, op = q.op) => `opacity:${op};transform:translate(${fmt(q.x)}px,${fmt(q.y)}px) rotate(${fmt(q.r)}deg)`;
     if (e.kind !== "boss") {
-      const cls = tl.track(raw.map((q): Frame => [q.t, `opacity:${q.op};transform:translate(${fmt(q.x)}px,${fmt(q.y)}px) rotate(${fmt(q.r)}deg)`]));
-      enemyEls.push(`<g class="${cls}">${flap(["a", "b"])}</g>`);
+      enemyEls.push(`<use href="#${id}" class="${tl.track(raw.map((q): Frame => [q.t, pose(q)]))}"/>`);
       continue;
     }
     const hit = e.hit === null ? null : at(e.hit);
+    if (!isCaptor || !capture) {
+      if (hit === null) {
+        enemyEls.push(`<use href="#${id}" class="${tl.track(raw.map((q): Frame => [q.t, pose(q)]))}"/>`);
+        continue;
+      }
+      // A hit boss changes look for good, so each look gets its own element and track.
+      const p = poseAt(raw, hit);
+      const healthy: Frame[] = [...raw.filter((q) => q.t < hit).map((q): Frame => [q.t, pose(q)]), [hit, pose(p)], [hit, pose(p, 0)], ...raw.filter((q) => q.t >= restore).map((q): Frame => [q.t, pose(q)])];
+      const hurt: Frame[] = [
+        [0, pose(raw[0], 0)],
+        [hit, pose(p, 0)],
+        [hit, pose(p)],
+        ...raw.filter((q) => q.t > hit && q.t < restore).map((q): Frame => [q.t, pose(q)]),
+        ...raw.filter((q) => q.t >= restore).map((q): Frame => [q.t, pose(q, 0)]),
+      ];
+      enemyEls.push(`<use href="#${id}" class="${tl.track(healthy)}"/><use href="#${id}h" class="${tl.track(hurt)}"/>`);
+      continue;
+    }
     const healthy = tl.track(hit === null ? [[0, "opacity:1"]] : [[0, "opacity:1"], [hit, "opacity:1"], [hit, "opacity:0"], [restore, "opacity:0"], [restore, "opacity:1"]]);
     const hurt = tl.track(hit === null ? [[0, "opacity:0"]] : [[0, "opacity:0"], [hit, "opacity:0"], [hit, "opacity:1"], [restore, "opacity:1"], [restore, "opacity:0"]]);
-    const look = `<g class="${healthy}">${flap(["a", "b"])}</g><g class="${hurt}">${flap(["c", "d"])}</g>`;
+    const look = `<use href="#${id}" class="${healthy}"/><use href="#${id}h" class="${hurt}"/>`;
     // The captive ship hangs below its captor without turning with it, so position and rotation get separate tracks.
     const pos = tl.track(raw.map((q): Frame => [q.t, `opacity:${q.op};transform:translate(${fmt(q.x)}px,${fmt(q.y)}px)`]));
     const rot = tl.track(raw.map((q): Frame => [q.t, `transform:rotate(${fmt(q.r)}deg)`]));
-    let captive = "";
-    if (isCaptor && capture) {
-      const shown = at(capture.abductEnd);
-      const gone = rescue ? at(rescue.t) : restore;
-      const capTrack = tl.track([[0, "opacity:0"], [shown, "opacity:0"], [shown, "opacity:1"], [gone, "opacity:1"], [gone, "opacity:0"]]);
-      captive = `<use href="#shipr" class="${capTrack}" y="19"/>`;
-    }
-    enemyEls.push(`<g class="${pos}"><g class="${rot}">${look}</g>${captive}</g>`);
+    const shown = at(capture.abductEnd);
+    const gone = rescue ? at(rescue.t) : restore;
+    const capTrack = tl.track([[0, "opacity:0"], [shown, "opacity:0"], [shown, "opacity:1"], [gone, "opacity:1"], [gone, "opacity:0"]]);
+    enemyEls.push(`<g class="${pos}"><g class="${rot}">${look}</g><use href="#shipr" class="${capTrack}" y="19"/></g>`);
   }
 
   // Tractor beam, drawn in formation space so it stays attached to the boss as the formation breathes.
@@ -334,15 +450,20 @@ function render(ctx: GameContext): GameOutput {
     }
     const on = at(capture.beamOn);
     const off = at(capture.beamOff);
-    const grow = tl.track([
-      [0, "opacity:0;transform:scaleY(.05)"],
-      [on, "opacity:0;transform:scaleY(.05)"],
-      [on + 0.12, "opacity:1;transform:scaleY(.2)"],
-      [on + 0.55, "opacity:1;transform:scaleY(1)"],
-      [off, "opacity:1;transform:scaleY(1)"],
-      [off + 0.3, "opacity:0;transform:scaleY(1)"],
+    const shown = tl.track([
+      [0, "opacity:0"],
+      [on, "opacity:0"],
+      [on + 0.12, "opacity:1"],
+      [off, "opacity:1"],
+      [off + 0.3, "opacity:0"],
     ]);
-    beam = `<g transform="translate(${fmt(hx)} ${fmt(top)})"><g class="${grow}" style="transform-origin:0 0"><polygon points="${fmt(-w0)} 0 ${fmt(w0)} 0 ${fmt(w1)} ${fmt(height)} ${fmt(-w1)} ${fmt(height)}" fill="#4db8ff" opacity=".28"/>${lines.join("")}</g></g>`;
+    const grow = tl.track([
+      [0, "transform:scaleY(.05)"],
+      [on, "transform:scaleY(.05)"],
+      [on + 0.12, "transform:scaleY(.2)"],
+      [on + 0.55, "transform:scaleY(1)"],
+    ]);
+    beam = `<g class="${shown}"${glowAttr(theme)}><g transform="translate(${fmt(hx)} ${fmt(top)})"><g class="${grow}" style="transform-origin:0 0"><polygon points="${fmt(-w0)} 0 ${fmt(w0)} 0 ${fmt(w1)} ${fmt(height)} ${fmt(-w1)} ${fmt(height)}" fill="#4db8ff" opacity=".28"/>${lines.join("")}</g></g></g>`;
   }
 
   // Breathing.
@@ -351,45 +472,76 @@ function render(ctx: GameContext): GameOutput {
   breath.push([at(sim.end) + 0.01, "transform:scale(1)"], [duration, "transform:scale(1)"]);
   const breathCls = hasPlay ? tl.track(breath) : tl.track([[0, "transform:scale(1)"]]);
 
-  // Shots.
-  const shotEls: string[] = [];
+  // Shots and explosions replay on a few shared elements.
+  const reach = Math.ceil(theme.glow * 3) + 1;
+  const shotBeats: Beat[] = [];
   for (const s of sim.shots) {
     const dist = s.y0 - s.yEnd;
     const dur = Math.round((s.tEnd - s.t) * scale * 200) / 200;
     if (dist < 1 || dur <= 0) continue;
-    const key = `${Math.round(dist * 2)}:${dur}`;
-    let name = bulletKfs.get(key);
-    if (!name) {
-      name = tl.keyframes([
-        [0, "opacity:1;transform:translateY(0px)"],
-        [dur, "opacity:1;transform:translateY(" + fmt(-dist) + "px)"],
-        [dur + 0.001, "opacity:0;transform:translateY(" + fmt(-dist) + "px)"],
-        [duration, "opacity:0;transform:translateY(" + fmt(-dist) + "px)"],
-      ]);
-      bulletKfs.set(key, name);
-    }
-    const cls = tl.useKeyframes(name, at(s.t));
-    shotEls.push(`<g transform="translate(${fmt(s.x)} ${fmt(s.y0)})"><g class="${cls}"><rect x="-1.4" y="-5" width="2.8" height="10" rx="1" fill="${theme.accent}"/><rect x="-.5" y="-5" width="1" height="8" fill="#fff"/></g></g>`);
+    const from = `translate(${fmt(s.x)}px,${fmt(s.y0)}px)`;
+    const to = `translate(${fmt(s.x)}px,${fmt(s.y0 - dist)}px)`;
+    shotBeats.push({
+      t: at(s.t),
+      life: dur + 0.001,
+      frames: [[0, `opacity:1;transform:${from}`], [dur, `opacity:1;transform:${to}`], [dur + 0.001, `opacity:0;transform:${to}`]],
+    });
   }
+  // The glow filter sits on the lane itself, with a region of one bullet plus the blur, and is skipped while the lane is at opacity 0.
+  defs.push(glowRegion(theme, "glow-shot", 1.4 + reach, 5 + reach));
+  const shotEls = packLanes(shotBeats).map(
+    (lane) => `<g class="${tl.track(laneFrames(lane))}"${filterAttr(theme, "glow-shot")}><rect x="-1.4" y="-5" width="2.8" height="10" rx="1" fill="${theme.accent}"/><rect x="-.5" y="-5" width="1" height="8" fill="#fff"/></g>`,
+  );
 
-  // Explosions.
-  const boomEls: string[] = [];
-  for (const b of sim.booms) {
-    const t = at(b.t);
-    const k = b.size === "l" ? 1.9 : b.size === "m" ? 1.35 : 1;
+  // Each slot is a group that moves to its explosion and holds one element per part, replaying explosions in turn.
+  const BOOM_LIFE = 0.55;
+  const boomScale = (b: { size: string }) => (b.size === "l" ? 1.9 : b.size === "m" ? 1.35 : 1);
+  const boomPose = (k: number, extra = "") => `scale(${num(k)})${extra}`;
+  const boomRegions = new Map<string, number>();
+  const slots = packLanes(sim.booms.map((b) => ({ t: at(b.t), life: BOOM_LIFE, b })));
+  const boomEls = slots.map((slot) => {
+    const star: Beat[] = [];
+    const ring: Beat[] = [];
+    const spark: Beat[] = [];
+    const ring2: Beat[] = [];
+    for (const { t, b } of slot) {
+      const k = boomScale(b);
+      star.push({
+        t,
+        life: 0.4,
+        frames: [[0, `opacity:1;transform:${boomPose(k * 0.3)}`], [0.1, `opacity:1;transform:${boomPose(k)}`], [0.4, `opacity:0;transform:${boomPose(k * 1.45)}`]],
+      });
+      const ringFrames: Frame[] = [[0, `opacity:1;transform:${boomPose(k * 0.4)}`], [0.4, `opacity:0;transform:${boomPose(k * 3.2)}`]];
+      ring.push({ t, life: 0.4, frames: ringFrames });
+      spark.push({
+        t,
+        life: 0.55,
+        frames: [[0, `opacity:1;transform:${boomPose(k * 0.5, " rotate(0deg)")}`], [0.55, `opacity:0;transform:${boomPose(k * 2.1, " rotate(35deg)")}`]],
+      });
+      if (b.size === "l") ring2.push({ t: t + 0.12, life: 0.4, frames: ringFrames });
+    }
     const parts = [
-      `<use href="#bs" class="${tl.useKeyframes(starKf, t)}"/>`,
-      `<use href="#br" class="${tl.useKeyframes(ringKf, t)}"/>`,
-      `<use href="#bp" fill="${theme.accent}" class="${tl.useKeyframes(sparkKf, t)}"/>`,
+      `<use href="#bs" class="${tl.track(laneFrames(star))}"/>`,
+      `<use href="#br" class="${tl.track(laneFrames(ring))}"/>`,
+      `<use href="#bp" fill="${theme.accent}" class="${tl.track(laneFrames(spark))}"/>`,
     ];
-    if (b.size === "l") parts.push(`<use href="#br" class="${tl.useKeyframes(ringKf, t + 0.12)}" stroke="${theme.accent}"/>`);
-    boomEls.push(`<g transform="translate(${fmt(b.x)} ${fmt(b.y)}) scale(${k})">${parts.join("")}</g>`);
-  }
+    if (ring2.length) parts.push(`<use href="#br" class="${tl.track(laneFrames(ring2))}" stroke="${theme.accent}"/>`);
+    // A glow filter costs a blur even while everything inside is invisible, but not while its group is at opacity 0.
+    const move = slot.map(({ t, b }): Beat => {
+      const place = `translate(${fmt(b.x)}px,${fmt(b.y)}px)`;
+      return { t, life: BOOM_LIFE, frames: [[0, `opacity:1;transform:${place}`], [BOOM_LIFE, `opacity:1;transform:${place}`], [BOOM_LIFE + 0.001, `opacity:0;transform:${place}`]] };
+    });
+    // The blur region only has to hold the biggest explosion the slot plays (the spark flies out to about 30 units).
+    const half = Math.ceil(30 * Math.max(...slot.map(({ b }) => boomScale(b)))) + reach;
+    boomRegions.set(`glow-boom-${half}`, half);
+    return `<g class="${tl.track(laneFrames(move))}"${filterAttr(theme, `glow-boom-${half}`)}>${parts.join("")}</g>`;
+  });
+  for (const [id, half] of boomRegions) defs.push(glowRegion(theme, id, half, half));
 
   // Fighter.
   const keyCss = (k: { x: number; y: number; rot: number; scale: number }) => `transform:translate(${fmt(k.x)}px,${fmt(k.y)}px) rotate(${fmt(k.rot)}deg) scale(${fmt(k.scale)})`;
   const fighterFrames: Frame[] = [];
-  for (const k of sim.fighter) fighterFrames.push([at(k.t), keyCss(k)]);
+  for (const k of thin(sim.fighter, (f) => [f.x, f.y, f.rot, f.scale], [0.04, 0.04, 0.15, 0.002])) fighterFrames.push([at(k.t), keyCss(k)]);
   const startKey = sim.fighter[0] ?? { x: cx, y: FIGHTER_Y, rot: 0, scale: 1, t: 0 };
   const endKey = sim.fighter[sim.fighter.length - 1] ?? startKey;
   const hideAt = restore + 0.3;
@@ -416,7 +568,8 @@ function render(ctx: GameContext): GameOutput {
       ff.push([t0 + (t1 - t0) * u, `opacity:1;transform:translate(${fmt(x)}px,${fmt(y)}px) rotate(${fmt(720 * (1 - ease))}deg)`]);
     }
     ff.push([t1 + 0.001, `opacity:0;transform:translate(${fmt(fx1)}px,${fmt(fy1)}px) rotate(0deg)`], [duration, `opacity:0;transform:translate(${fmt(fx1)}px,${fmt(fy1)}px) rotate(0deg)`]);
-    flyer = `<g${glowAttr(theme)}><use href="#shipw" class="${tl.track(ff)}"/></g>`;
+    // Hidden outside the flight so the glow filter is skipped.
+    flyer = `<g class="${tl.visible(t0, t1 + 0.002)}"${glowAttr(theme)}><use href="#shipw" class="${tl.track(ff)}"/></g>`;
   }
 
   const stageCss = [
@@ -424,8 +577,11 @@ function render(ctx: GameContext): GameOutput {
     `@keyframes scroll{from{transform:translateY(0)}to{transform:translateY(${layout.height}px)}}`,
     ".tw0{animation:tw .9s ease-in-out infinite}.tw1{animation:tw 1.4s ease-in-out infinite}.tw2{animation:tw 2.1s ease-in-out infinite}",
     "@keyframes tw{0%,100%{opacity:.95}50%{opacity:.25}}",
-    ".fa{animation:flapa .7s steps(1) infinite}.fb{animation:flapb .7s steps(1) infinite}",
-    "@keyframes flapa{0%{opacity:1}50%{opacity:0}}@keyframes flapb{0%{opacity:0}50%{opacity:1}}",
+    // The wing flap is one animated variable on the root that every sprite reads, instead of an animation per sprite.
+    // Browsers that cannot animate it just show the first frame.
+    "@property --fa{syntax:'*';inherits:true;initial-value:visible}@property --fb{syntax:'*';inherits:true;initial-value:hidden}",
+    ":root{animation:flap .7s steps(1) infinite}@keyframes flap{0%{--fa:visible;--fb:hidden}50%{--fa:hidden;--fb:visible}100%{--fa:visible;--fb:hidden}}",
+    ".fa{visibility:var(--fa,visible)}.fb{visibility:var(--fb,hidden)}",
     ".bl{animation:beam .6s linear infinite}",
     "@keyframes beam{0%{opacity:0}30%{opacity:1}100%{opacity:0}}",
     `.breath{transform-origin:${fmt(cx)}px ${fmt(cy)}px}`,
@@ -437,9 +593,9 @@ function render(ctx: GameContext): GameOutput {
   const body = [
     `<g>${layers.join("")}</g>`,
     `<g>${tiles.join("")}</g>`,
-    `<g class="breath ${breathCls}"${glowAttr(theme)}>${beam}${enemyEls.join("")}</g>`,
-    `<g${glowAttr(theme)}>${shotEls.join("")}</g>`,
-    `<g${glowAttr(theme)}>${boomEls.join("")}</g>`,
+    `<g class="breath ${breathCls}">${beam}${enemyEls.join("")}</g>`,
+    shotEls.join(""),
+    boomEls.join(""),
     flyer,
     `<g class="${fighterCls}"><g class="${fadeCls}"${glowAttr(theme)}><use href="#shipw"/><use href="#shipw" x="${SEP}" class="${shipB}"/></g></g>`,
     hudMarkup,

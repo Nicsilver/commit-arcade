@@ -96,3 +96,46 @@ test("galaga renders in every theme", () => {
     assert.ok(render(grids.sample, theme).includes("<svg"));
   }
 });
+
+function keyframesByClass(svg: string): Map<string, string[]> {
+  const rules = new Map<string, string>();
+  for (const m of svg.matchAll(/@keyframes (k\d+)\{(.*?)\}\n/g)) rules.set(m[1], m[2]);
+  const out = new Map<string, string[]>();
+  for (const m of svg.matchAll(/\.(k\d+)\{animation:(k\d+) /g)) {
+    out.set(m[1], [...(rules.get(m[2]) ?? "").matchAll(/[\d.]+%\{([^}]*)\}/g)].map((f) => f[1]));
+  }
+  return out;
+}
+
+test("galaga animates few elements, since each one costs the browser every frame", () => {
+  const svg = render(grids.sample);
+  const animated = new Set([...svg.matchAll(/\.([\w-]+)\{animation:/g)].map((m) => m[1]));
+  let count = 0;
+  for (const m of svg.matchAll(/<\w+[^>]*? class="([^"]+)"/g)) if (m[1].split(" ").some((c) => animated.has(c))) count++;
+  assert.ok(count < 450, `${count} animated elements`);
+});
+
+test("galaga enemy tracks end where they start so the loop has no jump", () => {
+  const svg = render(grids.sample);
+  const tracks = keyframesByClass(svg);
+  let checked = 0;
+  for (const m of svg.matchAll(/<use href="#e-[a-z]+\d+h?" class="(k\d+)"/g)) {
+    const frames = tracks.get(m[1]) ?? [];
+    assert.ok(frames.length >= 2, m[1]);
+    assert.equal(frames[0], frames[frames.length - 1], m[1]);
+    checked++;
+  }
+  assert.ok(checked >= activeCells(grids.sample).length);
+});
+
+test("galaga pooled shots and explosions are invisible at the start and end of the loop", () => {
+  const svg = render(grids.sample);
+  const tracks = keyframesByClass(svg);
+  const pooled = [...svg.matchAll(/<use href="#b[srp]"[^>]*? class="(k\d+)"/g), ...svg.matchAll(/<g class="(k\d+)"[^>]*><rect x="-1.4"/g)];
+  assert.ok(pooled.length > 0);
+  for (const [, cls] of pooled) {
+    const frames = tracks.get(cls) ?? [];
+    assert.match(frames[0], /opacity:0/, cls);
+    assert.match(frames[frames.length - 1], /opacity:0/, cls);
+  }
+});
