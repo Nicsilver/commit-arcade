@@ -2930,6 +2930,207 @@ function radialSparks(count, reach, size, turn2 = 0) {
   });
 }
 
+// src/sprite-image.ts
+import { crc32, deflateSync } from "node:zlib";
+var PX_PER_CELL = 8;
+var GLOW_PX_PER_CELL = 2;
+var OUTLINE_SAMPLES = 4;
+var toLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+var toSrgb = (c) => c <= 31308e-7 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
+var cache = /* @__PURE__ */ new Map();
+function spriteImage(rows, palette, opts, attrs = "") {
+  const key = JSON.stringify([rows, palette, opts]);
+  let markup = cache.get(key);
+  if (markup === void 0) cache.set(key, markup = render3(rows, palette, opts));
+  return `<image${attrs ? " " + attrs : ""} ${markup}`;
+}
+function render3(rows, palette, opts) {
+  const cols = Math.max(...rows.map((r) => r.length));
+  const pxPerCell = opts.pxPerCell ?? PX_PER_CELL;
+  const sigmaPx = opts.sigma * (GLOW_PX_PER_CELL / opts.cell);
+  const margin = opts.sigma > 0 ? Math.ceil((sigmaPx * 3 + 1) / GLOW_PX_PER_CELL) : 1;
+  const scale = pxPerCell / GLOW_PX_PER_CELL;
+  const width = (cols + margin * 2) * pxPerCell;
+  const height = (rows.length + margin * 2) * pxPerCell;
+  const linear = /* @__PURE__ */ new Map();
+  const colour = (hex) => {
+    let c = linear.get(hex);
+    if (!c) {
+      const alpha = hex.length === 9 ? parseInt(hex.slice(7, 9), 16) / 255 : 1;
+      linear.set(hex, c = [...[1, 3, 5].map((i) => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255) * alpha), alpha]);
+    }
+    return c;
+  };
+  const filledAt = (cx, cy) => cy >= 0 && cy < rows.length && cx >= 0 && cx < cols && rows[cy][cx] !== void 0 && rows[cy][cx] !== "." && palette[rows[cy][cx]] !== void 0;
+  const reach = opts.outline ? opts.outline.width / 2 / opts.cell : 0;
+  const nearFilled = (u, v) => {
+    for (let cy = Math.floor(v - reach); cy <= Math.floor(v + reach); cy++) {
+      for (let cx = Math.floor(u - reach); cx <= Math.floor(u + reach); cx++) {
+        if (!filledAt(cx, cy)) continue;
+        const dx = Math.max(cx - u, 0, u - (cx + 1));
+        const dy = Math.max(cy - v, 0, v - (cy + 1));
+        if (dx * dx + dy * dy <= reach * reach) return true;
+      }
+    }
+    return false;
+  };
+  const sharp = new Float32Array(width * height * 4);
+  const samples = opts.outline ? OUTLINE_SAMPLES : 1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      for (let sy = 0; sy < samples; sy++) {
+        for (let sx = 0; sx < samples; sx++) {
+          const u = (x + (sx + 0.5) / samples) / pxPerCell - margin;
+          const v = (y + (sy + 0.5) / samples) / pxPerCell - margin;
+          const cx = Math.floor(u);
+          const cy = Math.floor(v);
+          const hex = filledAt(cx, cy) ? palette[rows[cy][cx]] : opts.outline && nearFilled(u, v) ? opts.outline.color : null;
+          if (hex === null) continue;
+          const [lr, lg, lb, la] = colour(hex);
+          r += lr;
+          g += lg;
+          b += lb;
+          a += la;
+        }
+      }
+      const i = (y * width + x) * 4;
+      const n = samples * samples;
+      sharp[i] = r / n;
+      sharp[i + 1] = g / n;
+      sharp[i + 2] = b / n;
+      sharp[i + 3] = a / n;
+    }
+  }
+  let glow = null;
+  const gw = width / scale;
+  const gh = height / scale;
+  if (opts.sigma > 0) {
+    const small = new Float32Array(gw * gh * 4);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        for (let c = 0; c < 4; c++) {
+          let sum = 0;
+          for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) sum += sharp[((y * scale + sy) * width + x * scale + sx) * 4 + c];
+          small[(y * gw + x) * 4 + c] = sum / (scale * scale);
+        }
+      }
+    }
+    glow = blur(blur(small, gw, gh, sigmaPx, true), gw, gh, sigmaPx, false);
+  }
+  const rgba = Buffer.alloc(width * height * 4);
+  const sampleGlow = (x, y, c) => {
+    const fx = Math.min(gw - 1, Math.max(0, (x + 0.5) / scale - 0.5));
+    const fy = Math.min(gh - 1, Math.max(0, (y + 0.5) / scale - 0.5));
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(gw - 1, x0 + 1);
+    const y1 = Math.min(gh - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const at = (px, py) => glow[(py * gw + px) * 4 + c];
+    return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+  };
+  for (let i = 0; i < width * height; i++) {
+    const x = i % width;
+    const y = (i - x) / width;
+    const sa = sharp[i * 4 + 3];
+    const px = [0, 1, 2, 3].map((c) => sharp[i * 4 + c] + (glow ? sampleGlow(x, y, c) * (1 - sa) : 0));
+    const a = px[3];
+    if (a < 1 / 512) continue;
+    const solid = !glow || a > 0.8;
+    for (let c = 0; c < 3; c++) {
+      const v = Math.round(Math.min(1, Math.max(0, toSrgb(px[c] / a))) * 255);
+      rgba[i * 4 + c] = solid ? v : Math.min(255, Math.round(v / 16) * 16);
+    }
+    rgba[i * 4 + 3] = solid ? Math.round(Math.min(1, a) * 255) : Math.round(a * 255 / 4) * 4;
+  }
+  const unit = opts.cell / pxPerCell;
+  return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(opts.x - margin * opts.cell)}" y="${fmt(opts.y - margin * opts.cell)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
+}
+function blur(src, width, height, sigma, horizontal) {
+  const radius = Math.ceil(sigma * 3);
+  const kernel = new Float32Array(radius * 2 + 1);
+  let sum = 0;
+  for (let i = -radius; i <= radius; i++) sum += kernel[i + radius] = Math.exp(-(i * i) / (2 * sigma * sigma));
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+  const out = new Float32Array(src.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      for (let k = -radius; k <= radius; k++) {
+        const sx = horizontal ? x + k : x;
+        const sy = horizontal ? y : y + k;
+        if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+        const w = kernel[k + radius];
+        const s = (sy * width + sx) * 4;
+        for (let c = 0; c < 4; c++) out[o + c] += src[s + c] * w;
+      }
+    }
+  }
+  return out;
+}
+function png(rgba, width, height) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc32(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 6;
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  const paeth = (a, b, c) => {
+    const p = a + b - c;
+    const pa = Math.abs(p - a);
+    const pb = Math.abs(p - b);
+    const pc = Math.abs(p - c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  };
+  for (let y = 0; y < height; y++) {
+    const row = (i) => i < 0 ? 0 : rgba[y * stride + i];
+    const up = (i) => y === 0 || i < 0 ? 0 : rgba[(y - 1) * stride + i];
+    let best = Buffer.alloc(0);
+    let bestCost = Infinity;
+    let bestType = 0;
+    for (let type = 0; type < 5; type++) {
+      const line = Buffer.alloc(stride);
+      let cost = 0;
+      for (let i = 0; i < stride; i++) {
+        const a = row(i - 4);
+        const b = up(i);
+        const c = up(i - 4);
+        const pred = type === 0 ? 0 : type === 1 ? a : type === 2 ? b : type === 3 ? a + b >> 1 : paeth(a, b, c);
+        const v = rgba[y * stride + i] - pred & 255;
+        line[i] = v;
+        cost += v < 128 ? v : 256 - v;
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = line;
+        bestType = type;
+      }
+    }
+    raw[y * (stride + 1)] = bestType;
+    best.copy(raw, y * (stride + 1) + 1);
+  }
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(raw, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0))
+  ]);
+}
+
 // src/games/centipede.ts
 var TICK = 1 / 200;
 var BULLET_SPEED2 = 1500;
@@ -3351,7 +3552,9 @@ var MUSHROOM_ROWS = {
   bitten: ["..CCCC..", ".CCSCCC.", "CSSCCSCC", "C.CC.CSC", "........", "........", "........", "........"]
 };
 var MUSHROOM_SCALE = 1.5;
-var STRIP_PITCH = 20;
+var STRIP_GAP = 4;
+var STRIP_PITCH = (MUSHROOM_ROWS.full[0].length + STRIP_GAP) * MUSHROOM_SCALE;
+var MUSHROOM_PX = 3;
 var GNOME_ROWS = [
   "....H....",
   "...HHH...",
@@ -3408,6 +3611,15 @@ function dilate(rows) {
   }
   return out;
 }
+function rimmed(rows) {
+  const grown = dilate(rows);
+  return grown.map(
+    (line, y) => [...line].map((ch, x) => {
+      const own = rows[y - 1]?.[x - 1] ?? ".";
+      return own !== "." ? own : ch === "#" ? "R" : ".";
+    }).join("")
+  );
+}
 function sprite(rows, colors, scale, p, ox = 0, oy = 0) {
   const outline = `<path d="${bitmapPath(dilate(rows), scale, ox - scale, oy - scale)}" fill="${p.rim}" fill-opacity="${p.rimOpacity}"/>`;
   const layers = Object.entries(colors).map(([letter, fill]) => {
@@ -3416,10 +3628,14 @@ function sprite(rows, colors, scale, p, ox = 0, oy = 0) {
   });
   return outline + layers.join("");
 }
-function mushroomStrip(theme, level, p, dark) {
+function mushroomStrip(theme, level, p, dark, id) {
   const cap = spriteColor(theme, { level });
-  const colors = { C: cap, S: mix2(cap, "#ffffff", 0.7), T: mix2(cap, "#ffffff", dark ? 0.55 : 0.3) };
-  return [MUSHROOM_ROWS.full, MUSHROOM_ROWS.nibbled, MUSHROOM_ROWS.bitten].map((rows, i) => `<g transform="translate(${i * STRIP_PITCH} 0)">${sprite(rows, colors, MUSHROOM_SCALE, p)}</g>`).join("");
+  const states = [MUSHROOM_ROWS.full, MUSHROOM_ROWS.nibbled, MUSHROOM_ROWS.bitten];
+  const gap = ".".repeat(STRIP_GAP);
+  const strip = states[0].map((_, y) => states.map((rows) => rows[y]).join(gap));
+  const rim = `${p.rim}${Math.round(p.rimOpacity * 255).toString(16).padStart(2, "0")}`;
+  const colors = { C: cap, S: mix2(cap, "#ffffff", 0.7), T: mix2(cap, "#ffffff", dark ? 0.55 : 0.3), R: rim };
+  return spriteImage(rimmed(strip), colors, { sigma: 0, cell: MUSHROOM_SCALE, x: -MUSHROOM_SCALE, y: -MUSHROOM_SCALE, pxPerCell: MUSHROOM_PX }, `id="${id}"`);
 }
 function flicker(frames, period) {
   return frames.map(
@@ -3441,7 +3657,7 @@ function playPooled2(tl, events) {
   }
   return slots.map((s) => s.make(tl.track(s.frames)));
 }
-function render3(ctx) {
+function render4(ctx) {
   const { grid, theme } = ctx;
   const layout = arcadeLayout(grid);
   const { width, height } = layout;
@@ -3473,7 +3689,7 @@ function render3(ctx) {
   bursts.define("big", { life: 0.75, sparks: radialSparks(16, 30, 4, 0.3), ring: 28, ringWidth: 2.6, flash: dark ? 11 : 5, flashColor: flashColor2 });
   const cells = [];
   for (const column of grid.cells) for (const cell of column) if (cell) cells.push(cellRect(layout, cell, theme.empty));
-  const strips = [1, 2, 3, 4].map((level) => `<g id="st${level}">${mushroomStrip(theme, level, pal, dark)}</g>`).join("");
+  const strips = [1, 2, 3, 4].map((level) => mushroomStrip(theme, level, pal, dark, `st${level}`)).join("");
   const clip = `<clipPath id="mclip"><rect x="-3" y="-3" width="17" height="17"/></clipPath>`;
   const legs = (a) => `<path d="${a}" stroke="${pal.body}" stroke-width="1.7" stroke-linecap="round" fill="none"/>`;
   const segmentDef = `<g id="cseg">${flicker([legs("M-3 5.2v3M3 5.2v3M-3 -5.2v-3M3 -5.2v-3"), legs("M-1.2 5.4v3M4.8 5.2v3M-1.2 -5.4v-3M4.8 -5.2v-3")], 0.24)}<circle r="6.5" fill="${pal.body}" stroke="${pal.rim}" stroke-opacity="${pal.rimOpacity}" stroke-width="1.4"/><circle cx="-1.9" cy="-2" r="2" fill="#fff" fill-opacity=".38"/></g>`;
@@ -3608,7 +3824,7 @@ function render3(ctx) {
   );
   return { width, height, css: tl.css(), defs, body: body.join("\n") };
 }
-var centipede = { id: "centipede", title: "Centipede", render: render3 };
+var centipede = { id: "centipede", title: "Centipede", render: render4 };
 
 // src/games/galaga-path.ts
 var DEG = Math.PI / 180;
@@ -4235,203 +4451,6 @@ function playOnce(grid, rng, geo) {
   if (dualAt >= 0 && out.rescue) out.rescue.dockAt = dualAt;
   pushKey(out.end, fx);
   return out;
-}
-
-// src/games/galaga-sprites.ts
-import { crc32, deflateSync } from "node:zlib";
-var PX_PER_CELL = 8;
-var GLOW_PX_PER_CELL = 2;
-var OUTLINE_SAMPLES = 4;
-var toLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-var toSrgb = (c) => c <= 31308e-7 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
-var cache = /* @__PURE__ */ new Map();
-function spriteImage(rows, palette, opts, attrs = "") {
-  const key = JSON.stringify([rows, palette, opts]);
-  let markup = cache.get(key);
-  if (markup === void 0) cache.set(key, markup = render4(rows, palette, opts));
-  return `<image${attrs ? " " + attrs : ""} ${markup}`;
-}
-function render4(rows, palette, opts) {
-  const cols = Math.max(...rows.map((r) => r.length));
-  const sigmaPx = opts.sigma * (GLOW_PX_PER_CELL / opts.cell);
-  const margin = opts.sigma > 0 ? Math.ceil((sigmaPx * 3 + 1) / GLOW_PX_PER_CELL) : 1;
-  const scale = PX_PER_CELL / GLOW_PX_PER_CELL;
-  const width = (cols + margin * 2) * PX_PER_CELL;
-  const height = (rows.length + margin * 2) * PX_PER_CELL;
-  const linear = /* @__PURE__ */ new Map();
-  const colour = (hex) => {
-    let c = linear.get(hex);
-    if (!c) linear.set(hex, c = [1, 3, 5].map((i) => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255)));
-    return c;
-  };
-  const filledAt = (cx, cy) => cy >= 0 && cy < rows.length && cx >= 0 && cx < cols && rows[cy][cx] !== void 0 && rows[cy][cx] !== "." && palette[rows[cy][cx]] !== void 0;
-  const reach = opts.outline ? opts.outline.width / 2 / opts.cell : 0;
-  const nearFilled = (u, v) => {
-    for (let cy = Math.floor(v - reach); cy <= Math.floor(v + reach); cy++) {
-      for (let cx = Math.floor(u - reach); cx <= Math.floor(u + reach); cx++) {
-        if (!filledAt(cx, cy)) continue;
-        const dx = Math.max(cx - u, 0, u - (cx + 1));
-        const dy = Math.max(cy - v, 0, v - (cy + 1));
-        if (dx * dx + dy * dy <= reach * reach) return true;
-      }
-    }
-    return false;
-  };
-  const sharp = new Float32Array(width * height * 4);
-  const samples = opts.outline ? OUTLINE_SAMPLES : 1;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let r = 0;
-      let g = 0;
-      let b = 0;
-      let a = 0;
-      for (let sy = 0; sy < samples; sy++) {
-        for (let sx = 0; sx < samples; sx++) {
-          const u = (x + (sx + 0.5) / samples) / PX_PER_CELL - margin;
-          const v = (y + (sy + 0.5) / samples) / PX_PER_CELL - margin;
-          const cx = Math.floor(u);
-          const cy = Math.floor(v);
-          const hex = filledAt(cx, cy) ? palette[rows[cy][cx]] : opts.outline && nearFilled(u, v) ? opts.outline.color : null;
-          if (hex === null) continue;
-          const [lr, lg, lb] = colour(hex);
-          r += lr;
-          g += lg;
-          b += lb;
-          a += 1;
-        }
-      }
-      const i = (y * width + x) * 4;
-      const n = samples * samples;
-      sharp[i] = r / n;
-      sharp[i + 1] = g / n;
-      sharp[i + 2] = b / n;
-      sharp[i + 3] = a / n;
-    }
-  }
-  let glow = null;
-  const gw = width / scale;
-  const gh = height / scale;
-  if (opts.sigma > 0) {
-    const small = new Float32Array(gw * gh * 4);
-    for (let y = 0; y < gh; y++) {
-      for (let x = 0; x < gw; x++) {
-        for (let c = 0; c < 4; c++) {
-          let sum = 0;
-          for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) sum += sharp[((y * scale + sy) * width + x * scale + sx) * 4 + c];
-          small[(y * gw + x) * 4 + c] = sum / (scale * scale);
-        }
-      }
-    }
-    glow = blur(blur(small, gw, gh, sigmaPx, true), gw, gh, sigmaPx, false);
-  }
-  const rgba = Buffer.alloc(width * height * 4);
-  const sampleGlow = (x, y, c) => {
-    const fx = Math.min(gw - 1, Math.max(0, (x + 0.5) / scale - 0.5));
-    const fy = Math.min(gh - 1, Math.max(0, (y + 0.5) / scale - 0.5));
-    const x0 = Math.floor(fx);
-    const y0 = Math.floor(fy);
-    const x1 = Math.min(gw - 1, x0 + 1);
-    const y1 = Math.min(gh - 1, y0 + 1);
-    const tx = fx - x0;
-    const ty = fy - y0;
-    const at = (px, py) => glow[(py * gw + px) * 4 + c];
-    return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
-  };
-  for (let i = 0; i < width * height; i++) {
-    const x = i % width;
-    const y = (i - x) / width;
-    const sa = sharp[i * 4 + 3];
-    const px = [0, 1, 2, 3].map((c) => sharp[i * 4 + c] + (glow ? sampleGlow(x, y, c) * (1 - sa) : 0));
-    const a = px[3];
-    if (a < 1 / 512) continue;
-    const solid = !glow || a > 0.8;
-    for (let c = 0; c < 3; c++) {
-      const v = Math.round(Math.min(1, Math.max(0, toSrgb(px[c] / a))) * 255);
-      rgba[i * 4 + c] = solid ? v : Math.min(255, Math.round(v / 16) * 16);
-    }
-    rgba[i * 4 + 3] = solid ? Math.round(Math.min(1, a) * 255) : Math.round(a * 255 / 4) * 4;
-  }
-  const unit = opts.cell / PX_PER_CELL;
-  return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(opts.x - margin * opts.cell)}" y="${fmt(opts.y - margin * opts.cell)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
-}
-function blur(src, width, height, sigma, horizontal) {
-  const radius = Math.ceil(sigma * 3);
-  const kernel = new Float32Array(radius * 2 + 1);
-  let sum = 0;
-  for (let i = -radius; i <= radius; i++) sum += kernel[i + radius] = Math.exp(-(i * i) / (2 * sigma * sigma));
-  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
-  const out = new Float32Array(src.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const o = (y * width + x) * 4;
-      for (let k = -radius; k <= radius; k++) {
-        const sx = horizontal ? x + k : x;
-        const sy = horizontal ? y : y + k;
-        if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
-        const w = kernel[k + radius];
-        const s = (sy * width + sx) * 4;
-        for (let c = 0; c < 4; c++) out[o + c] += src[s + c] * w;
-      }
-    }
-  }
-  return out;
-}
-function png(rgba, width, height) {
-  const chunk = (type, data) => {
-    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-    const out = Buffer.alloc(body.length + 8);
-    out.writeUInt32BE(data.length, 0);
-    body.copy(out, 4);
-    out.writeUInt32BE(crc32(body), body.length + 4);
-    return out;
-  };
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = 6;
-  const stride = width * 4;
-  const raw = Buffer.alloc((stride + 1) * height);
-  const paeth = (a, b, c) => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a);
-    const pb = Math.abs(p - b);
-    const pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-  for (let y = 0; y < height; y++) {
-    const row = (i) => i < 0 ? 0 : rgba[y * stride + i];
-    const up = (i) => y === 0 || i < 0 ? 0 : rgba[(y - 1) * stride + i];
-    let best = Buffer.alloc(0);
-    let bestCost = Infinity;
-    let bestType = 0;
-    for (let type = 0; type < 5; type++) {
-      const line = Buffer.alloc(stride);
-      let cost = 0;
-      for (let i = 0; i < stride; i++) {
-        const a = row(i - 4);
-        const b = up(i);
-        const c = up(i - 4);
-        const pred = type === 0 ? 0 : type === 1 ? a : type === 2 ? b : type === 3 ? a + b >> 1 : paeth(a, b, c);
-        const v = rgba[y * stride + i] - pred & 255;
-        line[i] = v;
-        cost += v < 128 ? v : 256 - v;
-      }
-      if (cost < bestCost) {
-        bestCost = cost;
-        best = line;
-        bestType = type;
-      }
-    }
-    raw[y * (stride + 1)] = bestType;
-    best.copy(raw, y * (stride + 1) + 1);
-  }
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk("IHDR", header),
-    chunk("IDAT", deflateSync(raw, { level: 9 })),
-    chunk("IEND", Buffer.alloc(0))
-  ]);
 }
 
 // src/games/galaga.ts

@@ -9,6 +9,7 @@ import { arcadeLayout, banner, glowAttr, glowDefs, hud, spriteColor, stageClearL
 import type { ClearEvent } from "../kit.ts";
 import { bitmapPath, pixelText } from "../pixel-font.ts";
 import type { Rng } from "../rng.ts";
+import { spriteImage } from "../sprite-image.ts";
 import { cellRect } from "../svg.ts";
 import type { Layout } from "../svg.ts";
 import type { Theme } from "../theme.ts";
@@ -554,7 +555,11 @@ const MUSHROOM_ROWS = {
   bitten: ["..CCCC..", ".CCSCCC.", "CSSCCSCC", "C.CC.CSC", "........", "........", "........", "........"],
 };
 const MUSHROOM_SCALE = 1.5;
-const STRIP_PITCH = 20;
+/** A whole number of sprite pixels, so the three states fit one image on a shared pixel grid. */
+const STRIP_GAP = 4;
+const STRIP_PITCH = (MUSHROOM_ROWS.full[0].length + STRIP_GAP) * MUSHROOM_SCALE;
+// Two image pixels per user unit: exact at 2x, and Safari and Firefox scale it closest to the vector edges elsewhere.
+const MUSHROOM_PX = 3;
 
 const GNOME_ROWS = [
   "....H....",
@@ -631,6 +636,19 @@ function dilate(rows: string[]): string[] {
   return out;
 }
 
+/** `rows` grown by one pixel all round, with the new pixels marked R for the rim. */
+function rimmed(rows: string[]): string[] {
+  const grown = dilate(rows);
+  return grown.map((line, y) =>
+    [...line]
+      .map((ch, x) => {
+        const own = rows[y - 1]?.[x - 1] ?? ".";
+        return own !== "." ? own : ch === "#" ? "R" : ".";
+      })
+      .join(""),
+  );
+}
+
 /** An outlined sprite: `colors` maps each letter in `rows` to its fill. */
 function sprite(rows: string[], colors: Record<string, string>, scale: number, p: Palette, ox = 0, oy = 0): string {
   const outline = `<path d="${bitmapPath(dilate(rows), scale, ox - scale, oy - scale)}" fill="${p.rim}" fill-opacity="${p.rimOpacity}"/>`;
@@ -641,12 +659,19 @@ function sprite(rows: string[], colors: Record<string, string>, scale: number, p
   return outline + layers.join("");
 }
 
-function mushroomStrip(theme: Theme, level: number, p: Palette, dark: boolean): string {
+/**
+ * The three damage states side by side in one pre-rendered image, rim included. Two hundred
+ * mushrooms of vector paths, each clipped and moved by its own animation, made up most of
+ * the cost of every frame; one image draw each is a fraction of that.
+ */
+function mushroomStrip(theme: Theme, level: number, p: Palette, dark: boolean, id: string): string {
   const cap = spriteColor(theme, { level: level as Level });
-  const colors = { C: cap, S: mix(cap, "#ffffff", 0.7), T: mix(cap, "#ffffff", dark ? 0.55 : 0.3) };
-  return [MUSHROOM_ROWS.full, MUSHROOM_ROWS.nibbled, MUSHROOM_ROWS.bitten]
-    .map((rows, i) => `<g transform="translate(${i * STRIP_PITCH} 0)">${sprite(rows, colors, MUSHROOM_SCALE, p)}</g>`)
-    .join("");
+  const states = [MUSHROOM_ROWS.full, MUSHROOM_ROWS.nibbled, MUSHROOM_ROWS.bitten];
+  const gap = ".".repeat(STRIP_GAP);
+  const strip = states[0].map((_, y) => states.map((rows) => rows[y]).join(gap));
+  const rim = `${p.rim}${Math.round(p.rimOpacity * 255).toString(16).padStart(2, "0")}`;
+  const colors = { C: cap, S: mix(cap, "#ffffff", 0.7), T: mix(cap, "#ffffff", dark ? 0.55 : 0.3), R: rim };
+  return spriteImage(rimmed(strip), colors, { sigma: 0, cell: MUSHROOM_SCALE, x: -MUSHROOM_SCALE, y: -MUSHROOM_SCALE, pxPerCell: MUSHROOM_PX }, `id="${id}"`);
 }
 
 function flicker(frames: string[], period: number): string {
@@ -725,7 +750,7 @@ function render(ctx: GameContext): GameOutput {
   const cells: string[] = [];
   for (const column of grid.cells) for (const cell of column) if (cell) cells.push(cellRect(layout, cell, theme.empty));
 
-  const strips = [1, 2, 3, 4].map((level) => `<g id="st${level}">${mushroomStrip(theme, level, pal, dark)}</g>`).join("");
+  const strips = [1, 2, 3, 4].map((level) => mushroomStrip(theme, level, pal, dark, `st${level}`)).join("");
   const clip = `<clipPath id="mclip"><rect x="-3" y="-3" width="17" height="17"/></clipPath>`;
   const legs = (a: string) => `<path d="${a}" stroke="${pal.body}" stroke-width="1.7" stroke-linecap="round" fill="none"/>`;
   const segmentDef =

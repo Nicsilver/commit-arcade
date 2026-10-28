@@ -1,5 +1,5 @@
 import { crc32, deflateSync } from "node:zlib";
-import { fmt } from "../anim.ts";
+import { fmt } from "./anim.ts";
 
 /**
  * Pixel sprites pre-rendered to PNG, glow included. The browser repaints the
@@ -17,6 +17,8 @@ export interface SpriteImageOptions {
   x: number;
   y: number;
   outline?: { color: string; width: number };
+  /** Source pixels per sprite pixel; defaults to PX_PER_CELL. */
+  pxPerCell?: number;
 }
 
 // Source pixels per sprite pixel. Enough that the browser's downscale averages edges the way vector antialiasing would.
@@ -30,7 +32,7 @@ const toSrgb = (c: number) => (c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.
 
 const cache = new Map<string, string>();
 
-/** An `<image>` element; `attrs` is appended raw (class, style...). */
+/** An `<image>` element; `attrs` is appended raw (class, style...). Palette colours are #rrggbb or #rrggbbaa. */
 export function spriteImage(rows: string[], palette: Record<string, string>, opts: SpriteImageOptions, attrs = ""): string {
   const key = JSON.stringify([rows, palette, opts]);
   let markup = cache.get(key);
@@ -40,17 +42,22 @@ export function spriteImage(rows: string[], palette: Record<string, string>, opt
 
 function render(rows: string[], palette: Record<string, string>, opts: SpriteImageOptions): string {
   const cols = Math.max(...rows.map((r) => r.length));
+  const pxPerCell = opts.pxPerCell ?? PX_PER_CELL;
   const sigmaPx = opts.sigma * (GLOW_PX_PER_CELL / opts.cell);
   // Whole sprite pixels of margin, so both pixel grids line up with the sprite's edges.
   const margin = opts.sigma > 0 ? Math.ceil((sigmaPx * 3 + 1) / GLOW_PX_PER_CELL) : 1;
-  const scale = PX_PER_CELL / GLOW_PX_PER_CELL;
-  const width = (cols + margin * 2) * PX_PER_CELL;
-  const height = (rows.length + margin * 2) * PX_PER_CELL;
+  const scale = pxPerCell / GLOW_PX_PER_CELL;
+  const width = (cols + margin * 2) * pxPerCell;
+  const height = (rows.length + margin * 2) * pxPerCell;
 
-  const linear = new Map<string, [number, number, number]>();
+  // Premultiplied linear RGBA.
+  const linear = new Map<string, [number, number, number, number]>();
   const colour = (hex: string) => {
     let c = linear.get(hex);
-    if (!c) linear.set(hex, (c = [1, 3, 5].map((i) => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255)) as [number, number, number]));
+    if (!c) {
+      const alpha = hex.length === 9 ? parseInt(hex.slice(7, 9), 16) / 255 : 1;
+      linear.set(hex, (c = [...[1, 3, 5].map((i) => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255) * alpha), alpha] as [number, number, number, number]));
+    }
     return c;
   };
   const filledAt = (cx: number, cy: number) => cy >= 0 && cy < rows.length && cx >= 0 && cx < cols && rows[cy][cx] !== undefined && rows[cy][cx] !== "." && palette[rows[cy][cx]] !== undefined;
@@ -78,17 +85,17 @@ function render(rows: string[], palette: Record<string, string>, opts: SpriteIma
       let a = 0;
       for (let sy = 0; sy < samples; sy++) {
         for (let sx = 0; sx < samples; sx++) {
-          const u = (x + (sx + 0.5) / samples) / PX_PER_CELL - margin;
-          const v = (y + (sy + 0.5) / samples) / PX_PER_CELL - margin;
+          const u = (x + (sx + 0.5) / samples) / pxPerCell - margin;
+          const v = (y + (sy + 0.5) / samples) / pxPerCell - margin;
           const cx = Math.floor(u);
           const cy = Math.floor(v);
           const hex = filledAt(cx, cy) ? palette[rows[cy][cx]] : opts.outline && nearFilled(u, v) ? opts.outline.color : null;
           if (hex === null) continue;
-          const [lr, lg, lb] = colour(hex);
+          const [lr, lg, lb, la] = colour(hex);
           r += lr;
           g += lg;
           b += lb;
-          a += 1;
+          a += la;
         }
       }
       const i = (y * width + x) * 4;
@@ -149,7 +156,7 @@ function render(rows: string[], palette: Record<string, string>, opts: SpriteIma
     rgba[i * 4 + 3] = solid ? Math.round(Math.min(1, a) * 255) : Math.round((a * 255) / 4) * 4;
   }
 
-  const unit = opts.cell / PX_PER_CELL;
+  const unit = opts.cell / pxPerCell;
   return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(opts.x - margin * opts.cell)}" y="${fmt(opts.y - margin * opts.cell)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
 }
 

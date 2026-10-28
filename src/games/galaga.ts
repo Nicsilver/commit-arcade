@@ -6,7 +6,7 @@ import { cellCenter, cellOrigin } from "../svg.ts";
 import type { Theme } from "../theme.ts";
 import { routeAt, type Route } from "./galaga-path.ts";
 import { BREATH_STEP, FIGHTER_Y, SEP, breathAt, simulateGalaga, type EnemyRec } from "./galaga-sim.ts";
-import { spriteImage } from "./galaga-sprites.ts";
+import { spriteImage } from "../sprite-image.ts";
 
 const TARGET_PLAY = 58;
 const MIN_SCALE = 0.6;
