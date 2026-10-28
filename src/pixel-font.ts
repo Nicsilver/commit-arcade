@@ -80,6 +80,20 @@ export function pixelText(text: string, scale = 2): PixelText {
   return { d: parts.join(""), width: Math.max(0, chars.length * 6 - 1) * scale, height: 7 * scale };
 }
 
+/** The same text as bitmap rows ("#" / "."), one row per font pixel. */
+export function pixelRows(text: string): string[] {
+  const chars = [...text.toUpperCase()];
+  return Array.from({ length: 7 }, (_, y) =>
+    chars
+      .map((ch) => {
+        const rows = GLYPHS[ch];
+        if (!rows) throw new Error(`No pixel glyph for "${ch}"`);
+        return rows[y].replace(/1/g, "#").replace(/[^#]/g, ".").padEnd(5, ".");
+      })
+      .join("."),
+  );
+}
+
 /**
  * Turns bitmap rows ("#" / "." characters) into path data. Runs are merged
  * horizontally and then downwards so no hairline seams show between pixels

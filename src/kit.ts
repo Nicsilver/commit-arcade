@@ -1,6 +1,7 @@
 import { fmt, type Timeline } from "./anim.ts";
 import { activeCells, type Cell, type Grid } from "./grid.ts";
-import { pixelText } from "./pixel-font.ts";
+import { pixelRows, pixelText } from "./pixel-font.ts";
+import { spriteImage } from "./sprite-image.ts";
 import { makeLayout, type Layout } from "./svg.ts";
 import type { Theme } from "./theme.ts";
 
@@ -49,6 +50,29 @@ export function glowAttr(theme: Theme): string {
   return theme.glow > 0 ? ` filter="url(#${GLOW_ID})"` : "";
 }
 
+/**
+ * Pixel text with the theme's glow. The glow is blurred once into an image under the vector text:
+ * the whole picture is repainted every frame, so a live filter would blur the text again each time.
+ */
+// Image pixels per user unit for a glow: it is soft enough that the browser's smooth scaling loses nothing.
+const HALO_PX = 1;
+
+export function glowingText(theme: Theme, text: string, scale: number, x: number, y: number, fill: string): string {
+  const p = pixelText(text, scale);
+  const path = `<path d="${p.d}" transform="translate(${fmt(x)} ${fmt(y)})" fill="${fill}"/>`;
+  if (theme.glow <= 0) return path;
+  const rows = pixelRows(text);
+  const cols = rows.flatMap((r) => [...r].map((ch, i) => (ch === "#" ? i : -1))).filter((i) => i >= 0);
+  const lines = rows.map((r, i) => (r.includes("#") ? i : -1)).filter((i) => i >= 0);
+  const bx = x + Math.min(...cols) * scale;
+  const by = y + Math.min(...lines) * scale;
+  const bw = (Math.max(...cols) + 1) * scale - (bx - x);
+  const bh = (Math.max(...lines) + 1) * scale - (by - y);
+  // The glow filter's region is the text's bounding box grown by half its size on every side.
+  const clip = { x: bx - bw / 2, y: by - bh / 2, width: bw * 2, height: bh * 2 };
+  return spriteImage(rows, { "#": fill }, { sigma: theme.glow, cell: scale, x, y, haloOnly: true, clip, pxPerCell: scale * HALO_PX }) + path;
+}
+
 export interface ClearEvent {
   /** Seconds from the start of the loop. */
   t: number;
@@ -90,7 +114,7 @@ export function hud(tl: Timeline, grid: Grid, opts: HudOptions): string {
   out.push(scoreDigits(tl, opts, scoreX, y, theme.ink));
 
   const title = pixelText(opts.title, HUD_SCALE);
-  out.push(`<path d="${title.d}" transform="translate(${fmt((width - title.width) / 2)} ${y})" fill="${theme.accent}"${glowAttr(theme)}/>`);
+  out.push(glowingText(theme, opts.title, HUD_SCALE, (width - title.width) / 2, y, theme.accent));
 
   const hi = pad(total);
   const hiText = pixelText(hi, HUD_SCALE);
@@ -190,8 +214,10 @@ export function banner(tl: Timeline, opts: BannerOptions): string {
   ];
   let ty = y + 14;
   texts.forEach((p, i) => {
-    const fill = i === 0 ? theme.accent : theme.ink;
-    parts.push(`<path d="${p.d}" transform="translate(${fmt(opts.cx - p.width / 2)} ${fmt(ty)})" fill="${fill}"${i === 0 ? glowAttr(theme) : ""}/>`);
+    const x = opts.cx - p.width / 2;
+    parts.push(
+      i === 0 ? glowingText(theme, opts.lines[0], 4, x, ty, theme.accent) : `<path d="${p.d}" transform="translate(${fmt(x)} ${fmt(ty)})" fill="${theme.ink}"/>`,
+    );
     ty += p.height + gap;
   });
   return `<g class="${blink}">${parts.join("")}</g>`;

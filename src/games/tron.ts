@@ -734,10 +734,12 @@ function render(ctx: GameContext): GameOutput {
     `<g id="cyc0">${cycleDef(pal.player)}</g><g id="cyc1">${cycleDef(pal.rival)}</g>` +
     Object.entries(burstShapes).map(([id, shape]) => burstDef(id, shape)).join("");
 
-  const bar = hud(tl, grid, { theme, title: "TRON", clears, resetAt: restore, width });
+  // Tron has its own glow filter and no shared one, so its HUD and banner text stay unblurred.
+  const flat = { ...theme, glow: 0 };
+  const bar = hud(tl, grid, { theme: flat, title: "TRON", clears, resetAt: restore, width });
   const end = sim
     ? banner(tl, {
-        theme,
+        theme: flat,
         lines: stageClearLines(grid),
         cx: width / 2,
         cy: layout.top + layout.gridHeight / 2,

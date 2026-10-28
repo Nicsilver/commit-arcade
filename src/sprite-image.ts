@@ -19,6 +19,10 @@ export interface SpriteImageOptions {
   outline?: { color: string; width: number };
   /** Source pixels per sprite pixel; defaults to PX_PER_CELL. */
   pxPerCell?: number;
+  /** Only the glow, for drawing under the sprite's own vector art. */
+  haloOnly?: boolean;
+  /** Box the glow is cut to, as a filter region cuts it. */
+  clip?: { x: number; y: number; width: number; height: number };
 }
 
 // Source pixels per sprite pixel. Enough that the browser's downscale averages edges the way vector antialiasing would.
@@ -139,12 +143,24 @@ function render(rows: string[], palette: Record<string, string>, opts: SpriteIma
     const at = (px: number, py: number) => glow![(py * gw + px) * 4 + c];
     return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
   };
+  const unit = opts.cell / pxPerCell;
+  const left = opts.x - margin * opts.cell;
+  const top = opts.y - margin * opts.cell;
+  const clip = opts.clip;
+  // Fraction of fine pixel (x, y) inside the clip box.
+  const inside = (x: number, y: number) => {
+    if (!clip) return 1;
+    const span = (lo: number, from: number, to: number) => Math.min(Math.max((Math.min(lo + unit, to) - Math.max(lo, from)) / unit, 0), 1);
+    return span(left + x * unit, clip.x, clip.x + clip.width) * span(top + y * unit, clip.y, clip.y + clip.height);
+  };
   for (let i = 0; i < width * height; i++) {
     const x = i % width;
     const y = (i - x) / width;
+    const keep = inside(x, y);
+    if (keep === 0) continue;
     // The filter puts the sharp sprite over its own blur.
-    const sa = sharp[i * 4 + 3];
-    const px = [0, 1, 2, 3].map((c) => sharp[i * 4 + c] + (glow ? sampleGlow(x, y, c) * (1 - sa) : 0));
+    const sa = opts.haloOnly ? 0 : sharp[i * 4 + 3];
+    const px = [0, 1, 2, 3].map((c) => ((opts.haloOnly ? 0 : sharp[i * 4 + c]) + (glow ? sampleGlow(x, y, c) * (1 - sa) : 0)) * keep);
     const a = px[3];
     if (a < 1 / 512) continue;
     const solid = !glow || a > 0.8;
@@ -156,8 +172,7 @@ function render(rows: string[], palette: Record<string, string>, opts: SpriteIma
     rgba[i * 4 + 3] = solid ? Math.round(Math.min(1, a) * 255) : Math.round((a * 255) / 4) * 4;
   }
 
-  const unit = opts.cell / pxPerCell;
-  return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(opts.x - margin * opts.cell)}" y="${fmt(opts.y - margin * opts.cell)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
+  return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(left)}" y="${fmt(top)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
 }
 
 function blur(src: Float32Array, width: number, height: number, sigma: number, horizontal: boolean): Float32Array {

@@ -284,6 +284,17 @@ function pixelText(text, scale = 2) {
   });
   return { d: parts.join(""), width: Math.max(0, chars.length * 6 - 1) * scale, height: 7 * scale };
 }
+function pixelRows(text) {
+  const chars = [...text.toUpperCase()];
+  return Array.from(
+    { length: 7 },
+    (_, y) => chars.map((ch) => {
+      const rows = GLYPHS[ch];
+      if (!rows) throw new Error(`No pixel glyph for "${ch}"`);
+      return rows[y].replace(/1/g, "#").replace(/[^#]/g, ".").padEnd(5, ".");
+    }).join(".")
+  );
+}
 function bitmapPath(rows, scale = 1, ox = 0, oy = 0) {
   return bitmapRects(rows).map((r) => `M${fmt(ox + r.x * scale)} ${fmt(oy + r.y * scale)}h${fmt((r.end - r.x) * scale)}v${fmt(r.h * scale)}h${fmt(-(r.end - r.x) * scale)}z`).join("");
 }
@@ -316,6 +327,217 @@ function bitmapRects(rows) {
   });
   done.push(...open.values());
   return done;
+}
+
+// src/sprite-image.ts
+import { crc32, deflateSync } from "node:zlib";
+var PX_PER_CELL = 8;
+var GLOW_PX_PER_CELL = 2;
+var OUTLINE_SAMPLES = 4;
+var toLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+var toSrgb = (c) => c <= 31308e-7 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
+var cache = /* @__PURE__ */ new Map();
+function spriteImage(rows, palette, opts, attrs = "") {
+  const key = JSON.stringify([rows, palette, opts]);
+  let markup = cache.get(key);
+  if (markup === void 0) cache.set(key, markup = render(rows, palette, opts));
+  return `<image${attrs ? " " + attrs : ""} ${markup}`;
+}
+function render(rows, palette, opts) {
+  const cols = Math.max(...rows.map((r) => r.length));
+  const pxPerCell = opts.pxPerCell ?? PX_PER_CELL;
+  const sigmaPx = opts.sigma * (GLOW_PX_PER_CELL / opts.cell);
+  const margin = opts.sigma > 0 ? Math.ceil((sigmaPx * 3 + 1) / GLOW_PX_PER_CELL) : 1;
+  const scale = pxPerCell / GLOW_PX_PER_CELL;
+  const width = (cols + margin * 2) * pxPerCell;
+  const height = (rows.length + margin * 2) * pxPerCell;
+  const linear = /* @__PURE__ */ new Map();
+  const colour = (hex) => {
+    let c = linear.get(hex);
+    if (!c) {
+      const alpha = hex.length === 9 ? parseInt(hex.slice(7, 9), 16) / 255 : 1;
+      linear.set(hex, c = [...[1, 3, 5].map((i) => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255) * alpha), alpha]);
+    }
+    return c;
+  };
+  const filledAt = (cx, cy) => cy >= 0 && cy < rows.length && cx >= 0 && cx < cols && rows[cy][cx] !== void 0 && rows[cy][cx] !== "." && palette[rows[cy][cx]] !== void 0;
+  const reach = opts.outline ? opts.outline.width / 2 / opts.cell : 0;
+  const nearFilled = (u, v) => {
+    for (let cy = Math.floor(v - reach); cy <= Math.floor(v + reach); cy++) {
+      for (let cx = Math.floor(u - reach); cx <= Math.floor(u + reach); cx++) {
+        if (!filledAt(cx, cy)) continue;
+        const dx = Math.max(cx - u, 0, u - (cx + 1));
+        const dy = Math.max(cy - v, 0, v - (cy + 1));
+        if (dx * dx + dy * dy <= reach * reach) return true;
+      }
+    }
+    return false;
+  };
+  const sharp = new Float32Array(width * height * 4);
+  const samples = opts.outline ? OUTLINE_SAMPLES : 1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      for (let sy = 0; sy < samples; sy++) {
+        for (let sx = 0; sx < samples; sx++) {
+          const u = (x + (sx + 0.5) / samples) / pxPerCell - margin;
+          const v = (y + (sy + 0.5) / samples) / pxPerCell - margin;
+          const cx = Math.floor(u);
+          const cy = Math.floor(v);
+          const hex = filledAt(cx, cy) ? palette[rows[cy][cx]] : opts.outline && nearFilled(u, v) ? opts.outline.color : null;
+          if (hex === null) continue;
+          const [lr, lg, lb, la] = colour(hex);
+          r += lr;
+          g += lg;
+          b += lb;
+          a += la;
+        }
+      }
+      const i = (y * width + x) * 4;
+      const n = samples * samples;
+      sharp[i] = r / n;
+      sharp[i + 1] = g / n;
+      sharp[i + 2] = b / n;
+      sharp[i + 3] = a / n;
+    }
+  }
+  let glow = null;
+  const gw = width / scale;
+  const gh = height / scale;
+  if (opts.sigma > 0) {
+    const small = new Float32Array(gw * gh * 4);
+    for (let y = 0; y < gh; y++) {
+      for (let x = 0; x < gw; x++) {
+        for (let c = 0; c < 4; c++) {
+          let sum = 0;
+          for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) sum += sharp[((y * scale + sy) * width + x * scale + sx) * 4 + c];
+          small[(y * gw + x) * 4 + c] = sum / (scale * scale);
+        }
+      }
+    }
+    glow = blur(blur(small, gw, gh, sigmaPx, true), gw, gh, sigmaPx, false);
+  }
+  const rgba = Buffer.alloc(width * height * 4);
+  const sampleGlow = (x, y, c) => {
+    const fx = Math.min(gw - 1, Math.max(0, (x + 0.5) / scale - 0.5));
+    const fy = Math.min(gh - 1, Math.max(0, (y + 0.5) / scale - 0.5));
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(gw - 1, x0 + 1);
+    const y1 = Math.min(gh - 1, y0 + 1);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    const at = (px, py) => glow[(py * gw + px) * 4 + c];
+    return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+  };
+  const unit = opts.cell / pxPerCell;
+  const left = opts.x - margin * opts.cell;
+  const top = opts.y - margin * opts.cell;
+  const clip = opts.clip;
+  const inside = (x, y) => {
+    if (!clip) return 1;
+    const span = (lo, from, to) => Math.min(Math.max((Math.min(lo + unit, to) - Math.max(lo, from)) / unit, 0), 1);
+    return span(left + x * unit, clip.x, clip.x + clip.width) * span(top + y * unit, clip.y, clip.y + clip.height);
+  };
+  for (let i = 0; i < width * height; i++) {
+    const x = i % width;
+    const y = (i - x) / width;
+    const keep = inside(x, y);
+    if (keep === 0) continue;
+    const sa = opts.haloOnly ? 0 : sharp[i * 4 + 3];
+    const px = [0, 1, 2, 3].map((c) => ((opts.haloOnly ? 0 : sharp[i * 4 + c]) + (glow ? sampleGlow(x, y, c) * (1 - sa) : 0)) * keep);
+    const a = px[3];
+    if (a < 1 / 512) continue;
+    const solid = !glow || a > 0.8;
+    for (let c = 0; c < 3; c++) {
+      const v = Math.round(Math.min(1, Math.max(0, toSrgb(px[c] / a))) * 255);
+      rgba[i * 4 + c] = solid ? v : Math.min(255, Math.round(v / 16) * 16);
+    }
+    rgba[i * 4 + 3] = solid ? Math.round(Math.min(1, a) * 255) : Math.round(a * 255 / 4) * 4;
+  }
+  return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(left)}" y="${fmt(top)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
+}
+function blur(src, width, height, sigma, horizontal) {
+  const radius = Math.ceil(sigma * 3);
+  const kernel = new Float32Array(radius * 2 + 1);
+  let sum = 0;
+  for (let i = -radius; i <= radius; i++) sum += kernel[i + radius] = Math.exp(-(i * i) / (2 * sigma * sigma));
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+  const out = new Float32Array(src.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      for (let k = -radius; k <= radius; k++) {
+        const sx = horizontal ? x + k : x;
+        const sy = horizontal ? y : y + k;
+        if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+        const w = kernel[k + radius];
+        const s = (sy * width + sx) * 4;
+        for (let c = 0; c < 4; c++) out[o + c] += src[s + c] * w;
+      }
+    }
+  }
+  return out;
+}
+function png(rgba, width, height) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc32(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 6;
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  const paeth = (a, b, c) => {
+    const p = a + b - c;
+    const pa = Math.abs(p - a);
+    const pb = Math.abs(p - b);
+    const pc = Math.abs(p - c);
+    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+  };
+  for (let y = 0; y < height; y++) {
+    const row = (i) => i < 0 ? 0 : rgba[y * stride + i];
+    const up = (i) => y === 0 || i < 0 ? 0 : rgba[(y - 1) * stride + i];
+    let best = Buffer.alloc(0);
+    let bestCost = Infinity;
+    let bestType = 0;
+    for (let type = 0; type < 5; type++) {
+      const line = Buffer.alloc(stride);
+      let cost = 0;
+      for (let i = 0; i < stride; i++) {
+        const a = row(i - 4);
+        const b = up(i);
+        const c = up(i - 4);
+        const pred = type === 0 ? 0 : type === 1 ? a : type === 2 ? b : type === 3 ? a + b >> 1 : paeth(a, b, c);
+        const v = rgba[y * stride + i] - pred & 255;
+        line[i] = v;
+        cost += v < 128 ? v : 256 - v;
+      }
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = line;
+        bestType = type;
+      }
+    }
+    raw[y * (stride + 1)] = bestType;
+    best.copy(raw, y * (stride + 1) + 1);
+  }
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(raw, { level: 9 })),
+    chunk("IEND", Buffer.alloc(0))
+  ]);
 }
 
 // src/svg.ts
@@ -390,6 +612,21 @@ function glowDefs(theme) {
 function glowAttr(theme) {
   return theme.glow > 0 ? ` filter="url(#${GLOW_ID})"` : "";
 }
+var HALO_PX = 1;
+function glowingText(theme, text, scale, x, y, fill) {
+  const p = pixelText(text, scale);
+  const path = `<path d="${p.d}" transform="translate(${fmt(x)} ${fmt(y)})" fill="${fill}"/>`;
+  if (theme.glow <= 0) return path;
+  const rows = pixelRows(text);
+  const cols = rows.flatMap((r) => [...r].map((ch, i) => ch === "#" ? i : -1)).filter((i) => i >= 0);
+  const lines = rows.map((r, i) => r.includes("#") ? i : -1).filter((i) => i >= 0);
+  const bx = x + Math.min(...cols) * scale;
+  const by = y + Math.min(...lines) * scale;
+  const bw = (Math.max(...cols) + 1) * scale - (bx - x);
+  const bh = (Math.max(...lines) + 1) * scale - (by - y);
+  const clip = { x: bx - bw / 2, y: by - bh / 2, width: bw * 2, height: bh * 2 };
+  return spriteImage(rows, { "#": fill }, { sigma: theme.glow, cell: scale, x, y, haloOnly: true, clip, pxPerCell: scale * HALO_PX }) + path;
+}
 var DIGITS = 6;
 var HUD_SCALE = 2;
 function hud(tl, grid, opts) {
@@ -406,7 +643,7 @@ function hud(tl, grid, opts) {
   const scoreX = left + label("SCORE", left, theme.muted) + 10;
   out.push(scoreDigits(tl, opts, scoreX, y, theme.ink));
   const title = pixelText(opts.title, HUD_SCALE);
-  out.push(`<path d="${title.d}" transform="translate(${fmt((width - title.width) / 2)} ${y})" fill="${theme.accent}"${glowAttr(theme)}/>`);
+  out.push(glowingText(theme, opts.title, HUD_SCALE, (width - title.width) / 2, y, theme.accent));
   const hi = pad(total);
   const hiText = pixelText(hi, HUD_SCALE);
   const hiX = width - 26 - hiText.width;
@@ -483,8 +720,10 @@ function banner(tl, opts) {
   ];
   let ty = y + 14;
   texts.forEach((p, i) => {
-    const fill = i === 0 ? theme.accent : theme.ink;
-    parts.push(`<path d="${p.d}" transform="translate(${fmt(opts.cx - p.width / 2)} ${fmt(ty)})" fill="${fill}"${i === 0 ? glowAttr(theme) : ""}/>`);
+    const x2 = opts.cx - p.width / 2;
+    parts.push(
+      i === 0 ? glowingText(theme, opts.lines[0], 4, x2, ty, theme.accent) : `<path d="${p.d}" transform="translate(${fmt(x2)} ${fmt(ty)})" fill="${theme.ink}"/>`
+    );
     ty += p.height + gap;
   });
   return `<g class="${blink}">${parts.join("")}</g>`;
@@ -1898,7 +2137,7 @@ function paletteFor(theme) {
   }
   return { flameOuter: "#ff5f1f", flameMid: "#ffb21f", flameCore: "#fff6d0", flameStroke: "#b83c00", bombBody: "#161a2e", bombRim: "#0b0e1a", fuse: "#8a5a22", spark: "#ff9a1f" };
 }
-function render(ctx) {
+function render2(ctx) {
   const { grid, theme } = ctx;
   const pal = paletteFor(theme);
   const layout = arcadeLayout(grid);
@@ -2274,7 +2513,7 @@ function bomberSprite(theme, t) {
   const antenna = `<path d="M0-12.2V-10.6" stroke="${o}" stroke-width="1.3"/><g class="nod"><circle cx="0" cy="-13" r="2" fill="#ff6fae" stroke="${o}" stroke-width=".9"/></g>`;
   return `${shadow}${feetStand}${feetWalk}${body}${handsDown}${handsUp}${helmet}${faceParts}${antenna}`;
 }
-var bomberman = { id: "bomberman", title: "Bomberman", render };
+var bomberman = { id: "bomberman", title: "Bomberman", render: render2 };
 
 // src/games/breakout.ts
 var BALL_R = 4;
@@ -2630,7 +2869,7 @@ var state = (fill, opacity, scale) => `fill:${fill};opacity:${opacity};transform
 function flashColor(theme) {
   return theme.glow > 0 ? "#ffffff" : theme.accent;
 }
-function render2(ctx) {
+function render3(ctx) {
   const { grid, theme, rng } = ctx;
   const layout = arcadeLayout(grid);
   const sim = simulateBreakout(grid, layout, rng);
@@ -2859,7 +3098,7 @@ function render2(ctx) {
   ].join("\n");
   return { width: layout.width, height: layout.height, css, defs: glowDefs(theme), body: parts.join("\n") };
 }
-var breakout = { id: "breakout", title: "Breakout", render: render2 };
+var breakout = { id: "breakout", title: "Breakout", render: render3 };
 
 // src/fx.ts
 var Bursts = class {
@@ -2946,207 +3185,6 @@ function radialSparks(count, reach, size, turn2 = 0) {
     const r = reach * (0.7 + 0.3 * (i * 7 % 5) / 4);
     return { dx: Math.cos(a) * r, dy: Math.sin(a) * r, size: size * (i % 2 ? 0.8 : 1.1) };
   });
-}
-
-// src/sprite-image.ts
-import { crc32, deflateSync } from "node:zlib";
-var PX_PER_CELL = 8;
-var GLOW_PX_PER_CELL = 2;
-var OUTLINE_SAMPLES = 4;
-var toLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-var toSrgb = (c) => c <= 31308e-7 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
-var cache = /* @__PURE__ */ new Map();
-function spriteImage(rows, palette, opts, attrs = "") {
-  const key = JSON.stringify([rows, palette, opts]);
-  let markup = cache.get(key);
-  if (markup === void 0) cache.set(key, markup = render3(rows, palette, opts));
-  return `<image${attrs ? " " + attrs : ""} ${markup}`;
-}
-function render3(rows, palette, opts) {
-  const cols = Math.max(...rows.map((r) => r.length));
-  const pxPerCell = opts.pxPerCell ?? PX_PER_CELL;
-  const sigmaPx = opts.sigma * (GLOW_PX_PER_CELL / opts.cell);
-  const margin = opts.sigma > 0 ? Math.ceil((sigmaPx * 3 + 1) / GLOW_PX_PER_CELL) : 1;
-  const scale = pxPerCell / GLOW_PX_PER_CELL;
-  const width = (cols + margin * 2) * pxPerCell;
-  const height = (rows.length + margin * 2) * pxPerCell;
-  const linear = /* @__PURE__ */ new Map();
-  const colour = (hex) => {
-    let c = linear.get(hex);
-    if (!c) {
-      const alpha = hex.length === 9 ? parseInt(hex.slice(7, 9), 16) / 255 : 1;
-      linear.set(hex, c = [...[1, 3, 5].map((i) => toLinear(parseInt(hex.slice(i, i + 2), 16) / 255) * alpha), alpha]);
-    }
-    return c;
-  };
-  const filledAt = (cx, cy) => cy >= 0 && cy < rows.length && cx >= 0 && cx < cols && rows[cy][cx] !== void 0 && rows[cy][cx] !== "." && palette[rows[cy][cx]] !== void 0;
-  const reach = opts.outline ? opts.outline.width / 2 / opts.cell : 0;
-  const nearFilled = (u, v) => {
-    for (let cy = Math.floor(v - reach); cy <= Math.floor(v + reach); cy++) {
-      for (let cx = Math.floor(u - reach); cx <= Math.floor(u + reach); cx++) {
-        if (!filledAt(cx, cy)) continue;
-        const dx = Math.max(cx - u, 0, u - (cx + 1));
-        const dy = Math.max(cy - v, 0, v - (cy + 1));
-        if (dx * dx + dy * dy <= reach * reach) return true;
-      }
-    }
-    return false;
-  };
-  const sharp = new Float32Array(width * height * 4);
-  const samples = opts.outline ? OUTLINE_SAMPLES : 1;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let r = 0;
-      let g = 0;
-      let b = 0;
-      let a = 0;
-      for (let sy = 0; sy < samples; sy++) {
-        for (let sx = 0; sx < samples; sx++) {
-          const u = (x + (sx + 0.5) / samples) / pxPerCell - margin;
-          const v = (y + (sy + 0.5) / samples) / pxPerCell - margin;
-          const cx = Math.floor(u);
-          const cy = Math.floor(v);
-          const hex = filledAt(cx, cy) ? palette[rows[cy][cx]] : opts.outline && nearFilled(u, v) ? opts.outline.color : null;
-          if (hex === null) continue;
-          const [lr, lg, lb, la] = colour(hex);
-          r += lr;
-          g += lg;
-          b += lb;
-          a += la;
-        }
-      }
-      const i = (y * width + x) * 4;
-      const n = samples * samples;
-      sharp[i] = r / n;
-      sharp[i + 1] = g / n;
-      sharp[i + 2] = b / n;
-      sharp[i + 3] = a / n;
-    }
-  }
-  let glow = null;
-  const gw = width / scale;
-  const gh = height / scale;
-  if (opts.sigma > 0) {
-    const small = new Float32Array(gw * gh * 4);
-    for (let y = 0; y < gh; y++) {
-      for (let x = 0; x < gw; x++) {
-        for (let c = 0; c < 4; c++) {
-          let sum = 0;
-          for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) sum += sharp[((y * scale + sy) * width + x * scale + sx) * 4 + c];
-          small[(y * gw + x) * 4 + c] = sum / (scale * scale);
-        }
-      }
-    }
-    glow = blur(blur(small, gw, gh, sigmaPx, true), gw, gh, sigmaPx, false);
-  }
-  const rgba = Buffer.alloc(width * height * 4);
-  const sampleGlow = (x, y, c) => {
-    const fx = Math.min(gw - 1, Math.max(0, (x + 0.5) / scale - 0.5));
-    const fy = Math.min(gh - 1, Math.max(0, (y + 0.5) / scale - 0.5));
-    const x0 = Math.floor(fx);
-    const y0 = Math.floor(fy);
-    const x1 = Math.min(gw - 1, x0 + 1);
-    const y1 = Math.min(gh - 1, y0 + 1);
-    const tx = fx - x0;
-    const ty = fy - y0;
-    const at = (px, py) => glow[(py * gw + px) * 4 + c];
-    return (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
-  };
-  for (let i = 0; i < width * height; i++) {
-    const x = i % width;
-    const y = (i - x) / width;
-    const sa = sharp[i * 4 + 3];
-    const px = [0, 1, 2, 3].map((c) => sharp[i * 4 + c] + (glow ? sampleGlow(x, y, c) * (1 - sa) : 0));
-    const a = px[3];
-    if (a < 1 / 512) continue;
-    const solid = !glow || a > 0.8;
-    for (let c = 0; c < 3; c++) {
-      const v = Math.round(Math.min(1, Math.max(0, toSrgb(px[c] / a))) * 255);
-      rgba[i * 4 + c] = solid ? v : Math.min(255, Math.round(v / 16) * 16);
-    }
-    rgba[i * 4 + 3] = solid ? Math.round(Math.min(1, a) * 255) : Math.round(a * 255 / 4) * 4;
-  }
-  const unit = opts.cell / pxPerCell;
-  return `href="data:image/png;base64,${png(rgba, width, height).toString("base64")}" x="${fmt(opts.x - margin * opts.cell)}" y="${fmt(opts.y - margin * opts.cell)}" width="${fmt(width * unit)}" height="${fmt(height * unit)}"/>`;
-}
-function blur(src, width, height, sigma, horizontal) {
-  const radius = Math.ceil(sigma * 3);
-  const kernel = new Float32Array(radius * 2 + 1);
-  let sum = 0;
-  for (let i = -radius; i <= radius; i++) sum += kernel[i + radius] = Math.exp(-(i * i) / (2 * sigma * sigma));
-  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
-  const out = new Float32Array(src.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const o = (y * width + x) * 4;
-      for (let k = -radius; k <= radius; k++) {
-        const sx = horizontal ? x + k : x;
-        const sy = horizontal ? y : y + k;
-        if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
-        const w = kernel[k + radius];
-        const s = (sy * width + sx) * 4;
-        for (let c = 0; c < 4; c++) out[o + c] += src[s + c] * w;
-      }
-    }
-  }
-  return out;
-}
-function png(rgba, width, height) {
-  const chunk = (type, data) => {
-    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-    const out = Buffer.alloc(body.length + 8);
-    out.writeUInt32BE(data.length, 0);
-    body.copy(out, 4);
-    out.writeUInt32BE(crc32(body), body.length + 4);
-    return out;
-  };
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = 6;
-  const stride = width * 4;
-  const raw = Buffer.alloc((stride + 1) * height);
-  const paeth = (a, b, c) => {
-    const p = a + b - c;
-    const pa = Math.abs(p - a);
-    const pb = Math.abs(p - b);
-    const pc = Math.abs(p - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-  for (let y = 0; y < height; y++) {
-    const row = (i) => i < 0 ? 0 : rgba[y * stride + i];
-    const up = (i) => y === 0 || i < 0 ? 0 : rgba[(y - 1) * stride + i];
-    let best = Buffer.alloc(0);
-    let bestCost = Infinity;
-    let bestType = 0;
-    for (let type = 0; type < 5; type++) {
-      const line = Buffer.alloc(stride);
-      let cost = 0;
-      for (let i = 0; i < stride; i++) {
-        const a = row(i - 4);
-        const b = up(i);
-        const c = up(i - 4);
-        const pred = type === 0 ? 0 : type === 1 ? a : type === 2 ? b : type === 3 ? a + b >> 1 : paeth(a, b, c);
-        const v = rgba[y * stride + i] - pred & 255;
-        line[i] = v;
-        cost += v < 128 ? v : 256 - v;
-      }
-      if (cost < bestCost) {
-        bestCost = cost;
-        best = line;
-        bestType = type;
-      }
-    }
-    raw[y * (stride + 1)] = bestType;
-    best.copy(raw, y * (stride + 1) + 1);
-  }
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk("IHDR", header),
-    chunk("IDAT", deflateSync(raw, { level: 9 })),
-    chunk("IEND", Buffer.alloc(0))
-  ]);
 }
 
 // src/games/centipede.ts
@@ -8052,9 +8090,10 @@ function render9(ctx) {
     cycleMarkup.push(`<g transform="translate(${fmt(x2)} ${fmt(y)}) rotate(180)"><use href="#cyc1"/></g>`);
   }
   const defs = filter + `<g id="cyc0">${cycleDef(pal.player)}</g><g id="cyc1">${cycleDef(pal.rival)}</g>` + Object.entries(burstShapes).map(([id, shape]) => burstDef(id, shape)).join("");
-  const bar = hud(tl, grid, { theme, title: "TRON", clears, resetAt: restore, width });
+  const flat = { ...theme, glow: 0 };
+  const bar = hud(tl, grid, { theme: flat, title: "TRON", clears, resetAt: restore, width });
   const end = sim ? banner(tl, {
-    theme,
+    theme: flat,
     lines: stageClearLines(grid),
     cx: width / 2,
     cy: layout.top + layout.gridHeight / 2,
