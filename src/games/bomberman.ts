@@ -10,6 +10,7 @@ import { FLAME, simulateBomberman, type PowerKind } from "./bomberman-sim.ts";
 
 const OUTLINE = "#1b1f3b";
 const TARGET_PLAY = 58;
+const MORTAR = "M0 4H12M0 8H12M6 0V4M3 4V8M9 4V8M6 8V12";
 const DEBRIS = "M-1-7h2v2h-2zM5-5h2v2h-2zM6-1h2v2h-2zM4 4h2v2h-2zM-1 5h2v2h-2zM-6 4h2v2h-2zM-8-1h2v2h-2zM-6-5h2v2h-2z";
 /** Centre of the bomb artwork's bounding box, which the scale-in grows from. */
 const BOMB_CENTER = [0.1, -1.6];
@@ -89,11 +90,33 @@ function render(ctx: GameContext): GameOutput {
   for (const b of sim.breaks) cellSet.set(b.cell, at(b.tick));
 
   const defs: string[] = [glowDefs(theme)];
+  const mortars: string[] = [];
   for (let level = 1; level <= 4; level++) {
     const fill = theme.levels[level - 1];
-    const mortar = luminance(fill) < 0.3 ? mix(fill, "#ffffff", 0.22) : mix(fill, "#000000", 0.32);
-    defs.push(`<path id="bk${level}" d="M0 4H12M0 8H12M6 0V4M3 4V8M9 4V8M6 8V12" stroke="${mortar}" stroke-width="1" fill="none"/>`);
+    mortars[level] = luminance(fill) < 0.3 ? mix(fill, "#ffffff", 0.22) : mix(fill, "#000000", 0.32);
+    defs.push(`<path id="bk${level}" d="${MORTAR}" stroke="${mortars[level]}" stroke-width="1" fill="none"/>`);
   }
+  // The mortar of a whole group of blocks is one path per level: drawing hundreds of small
+  // stroked paths separately cost a good share of every frame.
+  const blockMarkup = (cells: Cell[]) => {
+    const rects = cells.map((cell) => {
+      const [cx, cy] = cellCenter(layout, cell.x, cell.y);
+      return `<rect x="${fmt(cx - 6)}" y="${fmt(cy - 6)}" width="12" height="12" rx="${layout.radius}" fill="${levelColor(theme, cell)}"/>`;
+    });
+    const mortar = [1, 2, 3, 4].map((level) => {
+      const d = cells
+        .filter((cell) => cell.level === level)
+        .map((cell) => {
+          const [cx, cy] = cellCenter(layout, cell.x, cell.y);
+          return MORTAR.replace(/([MHV])([\d.]+)(?: ([\d.]+))?/g, (_, cmd: string, a: string, b?: string) =>
+            cmd === "M" ? `M${fmt(cx - 6 + Number(a))} ${fmt(cy - 6 + Number(b))}` : `${cmd}${fmt((cmd === "H" ? cx : cy) - 6 + Number(a))}`,
+          );
+        })
+        .join("");
+      return d ? `<path d="${d}" stroke="${mortars[level]}" stroke-width="1" fill="none"/>` : "";
+    });
+    return rects.join("") + mortar.join("");
+  };
 
   // Arena: faint floor under the lane so Bomberman visibly walks somewhere.
   const floor: string[] = [];
@@ -111,25 +134,24 @@ function render(ctx: GameContext): GameOutput {
   // Blocks: unbroken ones are static; the rest share one fading group per break
   // tick, and a pooled copy plays the crumble.
   const blocks: string[] = [];
-  const doomed = new Map<number, string[]>();
+  const standing: Cell[] = [];
+  const doomed = new Map<number, Cell[]>();
   for (const column of grid.cells) {
     for (const cell of column) {
       if (!cell) continue;
       tiles.push(cellRect(layout, cell, theme.empty));
       if (cell.level === 0) continue;
-      const [cx, cy] = cellCenter(layout, cell.x, cell.y);
-      const fill = levelColor(theme, cell);
-      const body = `<rect x="${fmt(cx - 6)}" y="${fmt(cy - 6)}" width="12" height="12" rx="${layout.radius}" fill="${fill}"/><use href="#bk${cell.level}" x="${fmt(cx - 6)}" y="${fmt(cy - 6)}"/>`;
       const te = cellSet.get(cell);
       if (te === undefined) {
-        blocks.push(body);
+        standing.push(cell);
         continue;
       }
       const group = doomed.get(te);
-      if (group) group.push(body);
-      else doomed.set(te, [body]);
+      if (group) group.push(cell);
+      else doomed.set(te, [cell]);
     }
   }
+  blocks.push(blockMarkup(standing));
   for (const [te, bodies] of [...doomed].sort((a, b) => a[0] - b[0])) {
     const cls = tl.track([
       [0, "opacity:1"],
@@ -138,7 +160,7 @@ function render(ctx: GameContext): GameOutput {
       [restore, "opacity:0"],
       [fadeEnd, "opacity:1"],
     ]);
-    blocks.push(`<g class="${cls}">${bodies.join("")}</g>`);
+    blocks.push(`<g class="${cls}">${blockMarkup(bodies)}</g>`);
   }
 
   const byTick = [...sim.breaks].sort((a, b) => a.tick - b.tick);
